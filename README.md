@@ -31,14 +31,14 @@ Built with OpenLiteSpeed + MariaDB + PHP Native + Cloudflare Tunnel
 ## Quick Install
 
 ```bash
-wget -O install.sh https://raw.githubusercontent.com/USERNAME/litepanel/main/install.sh && chmod +x install.sh && sudo bash install.sh
+wget -O install.sh https://raw.githubusercontent.com/boybarley/litepanel/main/install.sh && chmod +x install.sh && sudo bash install.sh
 ```
 
 ## Step-by-Step Install
 
 ```bash
 # Download installer
-wget https://raw.githubusercontent.com/USERNAME/litepanel/main/install.sh
+wget https://raw.githubusercontent.com/boybarley/litepanel/main/install.sh
 
 # Make executable
 chmod +x install.sh
@@ -47,7 +47,7 @@ chmod +x install.sh
 sudo bash install.sh
 
 # After install completes, run patch for extra features
-wget https://raw.githubusercontent.com/USERNAME/litepanel/main/patch.sh
+wget https://raw.githubusercontent.com/boybarley/litepanel/main/patch.sh
 chmod +x patch.sh
 sudo bash patch.sh
 ```
@@ -103,7 +103,7 @@ After installation, secure your panel with Cloudflare Access:
 ## Uninstall
 
 ```bash
-wget https://raw.githubusercontent.com/USERNAME/litepanel/main/uninstall.sh
+wget https://raw.githubusercontent.com/boybarley/litepanel/main/uninstall.sh
 chmod +x uninstall.sh
 sudo bash uninstall.sh
 ```

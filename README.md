@@ -1,4 +1,4 @@
-# 🛠️ LitePanel By BoyBarley
+# 🛠️ LitePanel by BoyBarley
 
 **Lightweight Home Server Control Panel** for Ubuntu 22.04
 

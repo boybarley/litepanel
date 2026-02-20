@@ -1,2112 +1,834 @@
-```bash
+cat > /root/install.sh << 'MAINEOF'
 #!/bin/bash
 ###############################################################################
-# LitePanel Auto Installer for Ubuntu 22.04
-# Home Server / Lab Edition with Cloudflare Tunnel & Zero Trust
-# Version: 1.0.0
+# LitePanel Installer v2.0 - FINAL (All-in-One)
+# Ubuntu 22.04 + OpenLiteSpeed + MariaDB + Cloudflare Tunnel
+# No patches needed. No repair needed.
 ###############################################################################
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+info()  { echo -e "${GREEN}[OK]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[!!]${NC} $1"; }
+fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
+step()  { echo -e "\n${CYAN}═══════════════════════════════════════${NC}"; echo -e "${CYAN}  $1${NC}"; echo -e "${CYAN}═══════════════════════════════════════${NC}"; }
 
-log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step()  { echo -e "${CYAN}[STEP]${NC} $1"; }
-
-if [[ $EUID -ne 0 ]]; then
-    log_error "This script must be run as root"
-    exit 1
-fi
-
-if [[ ! -f /etc/os-release ]] || ! grep -q "22.04" /etc/os-release; then
-    log_warn "This script is designed for Ubuntu 22.04. Proceeding anyway..."
-fi
+[[ $EUID -ne 0 ]] && fail "Run as root"
 
 ###############################################################################
-# COLLECT CLOUDFLARE INFO
+# COLLECT INFO
 ###############################################################################
 echo ""
-echo -e "${CYAN}========================================${NC}"
-echo -e "${CYAN}   LitePanel Installer - Home Server    ${NC}"
-echo -e "${CYAN}========================================${NC}"
+echo -e "${CYAN}╔═══════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║    LitePanel Installer v2.0 FINAL     ║${NC}"
+echo -e "${CYAN}╚═══════════════════════════════════════╝${NC}"
 echo ""
 
-read -rp "Cloudflare Account Email: " CF_EMAIL
-while [[ -z "$CF_EMAIL" ]]; do
-    read -rp "Email cannot be empty. Cloudflare Account Email: " CF_EMAIL
-done
-
-read -rp "Cloudflare API Token (with Tunnel & DNS permissions): " CF_API_TOKEN
-while [[ -z "$CF_API_TOKEN" ]]; do
-    read -rp "Token cannot be empty. Cloudflare API Token: " CF_API_TOKEN
-done
-
-read -rp "Main Domain (e.g., example.com): " MAIN_DOMAIN
-while [[ -z "$MAIN_DOMAIN" ]]; do
-    read -rp "Domain cannot be empty. Main Domain: " MAIN_DOMAIN
-done
+read -rp "Cloudflare Email: " CF_EMAIL
+[[ -z "$CF_EMAIL" ]] && fail "Email required"
+read -rp "Cloudflare API Token: " CF_TOKEN
+[[ -z "$CF_TOKEN" ]] && fail "Token required"
+read -rp "Main Domain (e.g. example.com): " DOMAIN
+[[ -z "$DOMAIN" ]] && fail "Domain required"
 
 echo ""
-log_info "Configuration:"
-log_info "  Email:  $CF_EMAIL"
-log_info "  Domain: $MAIN_DOMAIN"
-log_info "  Panel:  panel.$MAIN_DOMAIN"
-log_info "  DB:     db.$MAIN_DOMAIN"
+info "Email:  $CF_EMAIL"
+info "Domain: $DOMAIN"
+info "Panel:  panel.$DOMAIN"
+info "DB:     db.$DOMAIN"
 echo ""
 read -rp "Continue? (y/n): " CONFIRM
-if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
-    log_error "Aborted by user."
-    exit 1
-fi
+[[ "$CONFIRM" != "y" ]] && exit 0
 
 ###############################################################################
-# VARIABLES
+# SAFE PASSWORDS (alphanumeric only - no bash issues)
 ###############################################################################
-INSTALL_PATH="/opt/litepanel"
-PANEL_PORT=2087
-WEB_PORT=8080
-TUNNEL_NAME="litepanel-home"
+genpw() { openssl rand -hex "${1:-16}"; }
 
-generate_password() {
-    tr -dc 'A-Za-z0-9!@#$%^&*()_+-=' < /dev/urandom | head -c 24 2>/dev/null || openssl rand -base64 24 | head -c 24
-}
-
-generate_alphanum_password() {
-    tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24 2>/dev/null || openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24
-}
-
-ADMIN_PASSWORD=$(generate_alphanum_password)
-DB_ROOT_PASSWORD=$(generate_alphanum_password)
-DB_NAME="litepanel_db"
-DB_USER="litepanel_user"
-DB_PASSWORD=$(generate_alphanum_password)
-OLS_ADMIN_PASSWORD=$(generate_alphanum_password)
-PANEL_SESSION_SECRET=$(generate_alphanum_password)
-CSRF_SECRET=$(generate_alphanum_password)
-
-CREDS_FILE="/root/.litepanel_credentials"
+ADMIN_PASS=$(genpw 12)
+DB_ROOT_PASS=$(genpw 16)
+DB_USER_PASS=$(genpw 16)
+OLS_ADMIN_PASS=$(genpw 12)
+PMA_BLOWFISH=$(genpw 32)
+CSRF_SECRET=$(genpw 32)
+TUNNEL_NAME="litepanel-$(hostname -s)"
 
 ###############################################################################
-# STEP 1: System Update
+step "1/12 - System Update & Prerequisites"
 ###############################################################################
-log_step "1/15 - Updating system..."
+dpkg --configure -a 2>/dev/null || true
+apt --fix-broken install -y 2>/dev/null || true
 apt-get update -y
 apt-get upgrade -y
-apt-get install -y software-properties-common apt-transport-https ca-certificates \
-    curl wget unzip gnupg lsb-release cron procps net-tools bc
+apt-get install -y software-properties-common apt-transport-https \
+    ca-certificates curl wget unzip gnupg lsb-release cron procps \
+    net-tools bc jq ufw fail2ban
+info "System updated"
 
 ###############################################################################
-# STEP 2: Install OpenLiteSpeed
+step "2/12 - Install OpenLiteSpeed + PHP 8.1"
 ###############################################################################
-log_step "2/15 - Installing OpenLiteSpeed..."
-if ! command -v /usr/local/lsws/bin/lswsctrl &>/dev/null; then
+if [[ ! -f /usr/local/lsws/bin/lswsctrl ]]; then
     wget -qO - https://repo.litespeed.sh | bash 2>/dev/null || true
     apt-get update -y
     apt-get install -y openlitespeed
 fi
 
-# Install LiteSpeed PHP 8.1
-log_step "Installing PHP for OpenLiteSpeed..."
 apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-opcache \
-    lsphp81-curl lsphp81-json lsphp81-mbstring lsphp81-xml \
-    lsphp81-zip lsphp81-gd lsphp81-intl lsphp81-imap 2>/dev/null || true
+    lsphp81-curl lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd \
+    lsphp81-intl lsphp81-imap 2>/dev/null || true
 
-# Fallback if json is built-in
-apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-opcache \
-    lsphp81-curl lsphp81-mbstring lsphp81-xml \
-    lsphp81-zip lsphp81-gd lsphp81-intl 2>/dev/null || true
+LSPHP="/usr/local/lsws/lsphp81/bin/lsphp"
+[[ ! -f "$LSPHP" ]] && LSPHP=$(find /usr/local/lsws/ -name "lsphp" -path "*/81/*" 2>/dev/null | head -1)
+[[ ! -f "$LSPHP" ]] && fail "lsphp81 not found"
 
-PHP_BIN="/usr/local/lsws/lsphp81/bin/lsphp"
-if [[ ! -f "$PHP_BIN" ]]; then
-    PHP_BIN=$(find /usr/local/lsws/ -name "lsphp" -path "*/81/*" 2>/dev/null | head -1)
-fi
-
-# Set OLS admin password
 /usr/local/lsws/admin/misc/admpass.sh <<EOF
 admin
-${OLS_ADMIN_PASSWORD}
-${OLS_ADMIN_PASSWORD}
+${OLS_ADMIN_PASS}
+${OLS_ADMIN_PASS}
 EOF
+info "OpenLiteSpeed + PHP 8.1 ready"
 
 ###############################################################################
-# STEP 3: Install MariaDB
+# Generate admin password hash (needs PHP)
 ###############################################################################
-log_step "3/15 - Installing MariaDB..."
+ADMIN_HASH=$("$LSPHP" -r "echo password_hash('${ADMIN_PASS}', PASSWORD_DEFAULT);" 2>/dev/null)
+[[ -z "$ADMIN_HASH" ]] && fail "Cannot generate password hash"
+
+###############################################################################
+step "3/12 - Install & Configure MariaDB"
+###############################################################################
+# Clean broken state if exists
+if dpkg -l 2>/dev/null | grep -q "mariadb-server" && ! systemctl is-active --quiet mariadb 2>/dev/null; then
+    warn "Broken MariaDB detected, purging..."
+    systemctl stop mariadb 2>/dev/null || true
+    killall -9 mysqld mysqld_safe 2>/dev/null || true
+    sleep 2
+    apt-get purge -y mariadb-server mariadb-client mariadb-common galera-4 2>/dev/null || true
+    apt-get autoremove -y 2>/dev/null || true
+    rm -rf /var/lib/mysql /etc/mysql /var/log/mysql /run/mysqld
+    dpkg --configure -a 2>/dev/null || true
+    apt --fix-broken install -y 2>/dev/null || true
+fi
+
 if ! command -v mariadb &>/dev/null; then
     apt-get install -y mariadb-server mariadb-client
 fi
+
 systemctl enable mariadb
 systemctl start mariadb
+sleep 3
 
-# Secure MariaDB
-log_step "Securing MariaDB..."
-mariadb -u root <<EOSQL || true
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASSWORD}';
-DELETE FROM mysql.user WHERE User='';
-DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-FLUSH PRIVILEGES;
-EOSQL
-
-# Create database and user
-mariadb -u root -p"${DB_ROOT_PASSWORD}" <<EOSQL || true
-CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
-FLUSH PRIVILEGES;
-EOSQL
-
-###############################################################################
-# STEP 4: Create LitePanel directory structure
-###############################################################################
-log_step "4/15 - Creating LitePanel directory structure..."
-mkdir -p "${INSTALL_PATH}"/{public,includes,sessions,logs,tmp,data}
-mkdir -p /home/default/public_html
-
-###############################################################################
-# STEP 5: Create LitePanel database tables
-###############################################################################
-log_step "5/15 - Creating database tables..."
-mariadb -u root -p"${DB_ROOT_PASSWORD}" "${DB_NAME}" <<'EOSQL'
-CREATE TABLE IF NOT EXISTS `users` (
-    `id` INT AUTO_INCREMENT PRIMARY KEY,
-    `username` VARCHAR(64) NOT NULL UNIQUE,
-    `password` VARCHAR(255) NOT NULL,
-    `email` VARCHAR(255) DEFAULT NULL,
-    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    `last_login` DATETIME DEFAULT NULL,
-    `login_attempts` INT DEFAULT 0,
-    `locked_until` DATETIME DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `domains` (
-    `id` INT AUTO_INCREMENT PRIMARY KEY,
-    `domain_name` VARCHAR(255) NOT NULL UNIQUE,
-    `document_root` VARCHAR(512) NOT NULL,
-    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    `status` ENUM('active','inactive') DEFAULT 'active'
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-CREATE TABLE IF NOT EXISTS `login_log` (
-    `id` INT AUTO_INCREMENT PRIMARY KEY,
-    `ip_address` VARCHAR(45) NOT NULL,
-    `username` VARCHAR(64) DEFAULT NULL,
-    `success` TINYINT(1) DEFAULT 0,
-    `attempted_at` DATETIME DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-EOSQL
-
-# Insert admin user
-ADMIN_HASH=$(php -r "echo password_hash('${ADMIN_PASSWORD}', PASSWORD_BCRYPT);")
-if ! command -v php &>/dev/null; then
-    ADMIN_HASH=$(/usr/local/lsws/lsphp81/bin/php -r "echo password_hash('${ADMIN_PASSWORD}', PASSWORD_BCRYPT);")
+if ! systemctl is-active --quiet mariadb; then
+    fail "MariaDB failed to start"
 fi
 
-mariadb -u root -p"${DB_ROOT_PASSWORD}" "${DB_NAME}" <<EOSQL
-INSERT INTO users (username, password) VALUES ('admin', '${ADMIN_HASH}')
-ON DUPLICATE KEY UPDATE password='${ADMIN_HASH}';
+# === KEY FIX: Set root with mysql_native_password ===
+mariadb << EOSQL
+SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${DB_ROOT_PASS}');
+UPDATE mysql.user SET plugin='mysql_native_password' WHERE User='root' AND Host='localhost';
+DELETE FROM mysql.user WHERE User='';
+DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
+DROP DATABASE IF EXISTS test;
+FLUSH PRIVILEGES;
 EOSQL
 
-###############################################################################
-# STEP 6: Generate LitePanel PHP Application
-###############################################################################
-log_step "6/15 - Generating LitePanel PHP application..."
+# Create .my.cnf immediately (for cron & shell commands)
+cat > /root/.my.cnf << MYCNF
+[client]
+user=root
+password=${DB_ROOT_PASS}
+[mysqldump]
+user=root
+password=${DB_ROOT_PASS}
+MYCNF
+chmod 600 /root/.my.cnf
 
-# config.php
-cat > "${INSTALL_PATH}/includes/config.php" <<PHPEOF
+# Verify root login works
+if ! mariadb -u root -p"${DB_ROOT_PASS}" -e "SELECT 1" &>/dev/null; then
+    fail "MariaDB root login failed"
+fi
+info "MariaDB installed & root configured with mysql_native_password"
+
+###############################################################################
+step "4/12 - Create Database, Tables & Panel User"
+###############################################################################
+mariadb -u root -p"${DB_ROOT_PASS}" << EOSQL
+CREATE DATABASE IF NOT EXISTS litepanel_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+DROP USER IF EXISTS 'litepanel_user'@'localhost';
+CREATE USER 'litepanel_user'@'localhost' IDENTIFIED BY '${DB_USER_PASS}';
+GRANT ALL PRIVILEGES ON *.* TO 'litepanel_user'@'localhost' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOSQL
+
+mariadb -u root -p"${DB_ROOT_PASS}" litepanel_db << 'EOSQL'
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(64) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    email VARCHAR(255) DEFAULT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    last_login DATETIME DEFAULT NULL,
+    failed_attempts INT DEFAULT 0,
+    locked_until DATETIME DEFAULT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS domains (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    domain VARCHAR(255) NOT NULL UNIQUE,
+    document_root VARCHAR(512) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status ENUM('active','inactive') DEFAULT 'active'
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS login_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ip_address VARCHAR(45) NOT NULL,
+    username VARCHAR(64) DEFAULT NULL,
+    success TINYINT(1) DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+EOSQL
+
+# Insert admin (use printf to safely handle $ in hash)
+printf "DELETE FROM users WHERE username='admin'; INSERT INTO users (username,password) VALUES ('admin','%s');\n" "$ADMIN_HASH" | mariadb -u root -p"${DB_ROOT_PASS}" litepanel_db
+info "Database & tables created"
+
+###############################################################################
+step "5/12 - Create Panel PHP Application"
+###############################################################################
+mkdir -p /opt/litepanel/{public,includes,sessions,logs,data,backups}
+mkdir -p /var/www/html
+
+# ---- config.php ----
+cat > /opt/litepanel/includes/config.php << XEOF
 <?php
-define('DB_HOST', 'localhost');
-define('DB_NAME', '${DB_NAME}');
-define('DB_USER', '${DB_USER}');
-define('DB_PASS', '${DB_PASSWORD}');
+define('DB_HOST', '127.0.0.1');
+define('DB_NAME', 'litepanel_db');
+define('DB_USER', 'litepanel_user');
+define('DB_PASS', '${DB_USER_PASS}');
+define('DB_ROOT_PASS', '${DB_ROOT_PASS}');
+define('PANEL_DOMAIN', '${DOMAIN}');
 define('CSRF_SECRET', '${CSRF_SECRET}');
-define('SESSION_NAME', 'LITEPANEL_SID');
+define('BASE_PATH', '/opt/litepanel');
+define('PANEL_VERSION', '2.0.0');
 define('SESSION_LIFETIME', 3600);
-define('RATE_LIMIT_ATTEMPTS', 5);
-define('RATE_LIMIT_WINDOW', 900);
-define('INSTALL_PATH', '${INSTALL_PATH}');
-define('OLS_BIN', '/usr/local/lsws/bin/lswsctrl');
-define('PANEL_VERSION', '1.0.0');
-PHPEOF
+session_save_path(BASE_PATH . '/sessions');
+ini_set('session.gc_maxlifetime', SESSION_LIFETIME);
+ini_set('session.cookie_httponly', 1);
+ini_set('session.cookie_samesite', 'Strict');
+ini_set('session.use_strict_mode', 1);
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+ini_set('error_log', BASE_PATH . '/logs/php_error.log');
+XEOF
 
-# database.php
-cat > "${INSTALL_PATH}/includes/database.php" <<'PHPEOF'
+# ---- database.php ----
+cat > /opt/litepanel/includes/database.php << 'XEOF'
 <?php
 class Database {
     private static $instance = null;
     private $pdo;
-
     private function __construct() {
         try {
-            $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=utf8mb4';
-            $this->pdo = new PDO($dsn, DB_USER, DB_PASS, [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES => false,
-            ]);
-        } catch (PDOException $e) {
-            error_log('Database connection failed: ' . $e->getMessage());
-            die('Database connection error.');
-        }
+            $this->pdo = new PDO("mysql:host=".DB_HOST.";dbname=".DB_NAME.";charset=utf8mb4", DB_USER, DB_PASS,
+                [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_EMULATE_PREPARES => false]);
+        } catch (PDOException $e) { error_log("DB: ".$e->getMessage()); die("Database connection error."); }
     }
-
-    public static function getInstance() {
-        if (self::$instance === null) {
-            self::$instance = new self();
-        }
-        return self::$instance;
-    }
-
-    public function getPdo() {
-        return $this->pdo;
-    }
-
-    public function query($sql, $params = []) {
-        $stmt = $this->pdo->prepare($sql);
-        $stmt->execute($params);
-        return $stmt;
-    }
-
-    public function fetchOne($sql, $params = []) {
-        return $this->query($sql, $params)->fetch();
-    }
-
-    public function fetchAll($sql, $params = []) {
-        return $this->query($sql, $params)->fetchAll();
-    }
+    public static function getInstance() { if (self::$instance === null) self::$instance = new self(); return self::$instance; }
+    public function query($sql, $params = []) { $s = $this->pdo->prepare($sql); $s->execute($params); return $s; }
+    public function fetch($sql, $params = []) { return $this->query($sql, $params)->fetch(); }
+    public function fetchAll($sql, $params = []) { return $this->query($sql, $params)->fetchAll(); }
+    public function lastId() { return $this->pdo->lastInsertId(); }
+    public function getPdo() { return $this->pdo; }
 }
-PHPEOF
+XEOF
 
-# auth.php
-cat > "${INSTALL_PATH}/includes/auth.php" <<'PHPEOF'
+# ---- auth.php ----
+cat > /opt/litepanel/includes/auth.php << 'XEOF'
 <?php
-class Auth {
-    private $db;
+require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/database.php';
+require_once __DIR__ . '/functions.php';
+require_once __DIR__ . '/security.php';
 
-    public function __construct() {
-        $this->db = Database::getInstance();
+function startSession() { if (session_status() === PHP_SESSION_NONE) session_start(); }
+function isLoggedIn() { startSession(); return isset($_SESSION['user_id'],$_SESSION['username']); }
+function requireLogin() { if (!isLoggedIn()) { header('Location: /index.php'); exit; } }
+function e($s) { return htmlspecialchars($s ?? '', ENT_QUOTES, 'UTF-8'); }
+
+function login($username, $password) {
+    $db = Database::getInstance();
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    $user = $db->fetch("SELECT * FROM users WHERE username = ?", [$username]);
+    if ($user && $user['locked_until'] && strtotime($user['locked_until']) > time())
+        return ['success' => false, 'message' => 'Account locked. Try again later.'];
+    if ($user && password_verify($password, $user['password'])) {
+        startSession(); session_regenerate_id(true);
+        $_SESSION['user_id'] = $user['id'];
+        $_SESSION['username'] = $user['username'];
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        $_SESSION['login_time'] = time();
+        $db->query("UPDATE users SET last_login=NOW(), failed_attempts=0 WHERE id=?", [$user['id']]);
+        $db->query("INSERT INTO login_log (ip_address,username,success) VALUES (?,?,1)", [$ip,$username]);
+        return ['success' => true];
     }
-
-    public function generateCsrfToken() {
-        if (empty($_SESSION['csrf_token'])) {
-            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-        }
-        return $_SESSION['csrf_token'];
+    if ($user) {
+        $a = $user['failed_attempts'] + 1;
+        $lock = $a >= 5 ? ", locked_until=DATE_ADD(NOW(), INTERVAL 15 MINUTE)" : "";
+        $db->query("UPDATE users SET failed_attempts={$a}{$lock} WHERE id=?", [$user['id']]);
     }
-
-    public function validateCsrfToken($token) {
-        return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
-    }
-
-    public function isRateLimited($ip) {
-        $result = $this->db->fetchOne(
-            "SELECT COUNT(*) as cnt FROM login_log WHERE ip_address = ? AND success = 0 AND attempted_at > DATE_SUB(NOW(), INTERVAL ? SECOND)",
-            [$ip, RATE_LIMIT_WINDOW]
-        );
-        return ($result['cnt'] >= RATE_LIMIT_ATTEMPTS);
-    }
-
-    public function logAttempt($ip, $username, $success) {
-        $this->db->query(
-            "INSERT INTO login_log (ip_address, username, success) VALUES (?, ?, ?)",
-            [$ip, $username, $success ? 1 : 0]
-        );
-    }
-
-    public function login($username, $password) {
-        $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
-
-        if ($this->isRateLimited($ip)) {
-            return ['success' => false, 'message' => 'Too many login attempts. Please wait 15 minutes.'];
-        }
-
-        $user = $this->db->fetchOne("SELECT * FROM users WHERE username = ?", [$username]);
-
-        if ($user && password_verify($password, $user['password'])) {
-            $this->logAttempt($ip, $username, true);
-            $this->db->query("UPDATE users SET last_login = NOW(), login_attempts = 0 WHERE id = ?", [$user['id']]);
-
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['username'] = $user['username'];
-            $_SESSION['logged_in'] = true;
-            $_SESSION['login_time'] = time();
-
-            session_regenerate_id(true);
-            return ['success' => true];
-        }
-
-        $this->logAttempt($ip, $username, false);
-        return ['success' => false, 'message' => 'Invalid username or password.'];
-    }
-
-    public function isLoggedIn() {
-        if (!isset($_SESSION['logged_in']) || $_SESSION['logged_in'] !== true) {
-            return false;
-        }
-        if (isset($_SESSION['login_time']) && (time() - $_SESSION['login_time']) > SESSION_LIFETIME) {
-            $this->logout();
-            return false;
-        }
-        return true;
-    }
-
-    public function logout() {
-        $_SESSION = [];
-        if (ini_get('session.use_cookies')) {
-            $params = session_get_cookie_params();
-            setcookie(session_name(), '', time() - 42000,
-                $params['path'], $params['domain'],
-                $params['secure'], $params['httponly']
-            );
-        }
-        session_destroy();
-    }
-
-    public function requireLogin() {
-        if (!$this->isLoggedIn()) {
-            header('Location: /index.php');
-            exit;
-        }
-    }
+    $db->query("INSERT INTO login_log (ip_address,username,success) VALUES (?,?,0)", [$ip,$username]);
+    return ['success' => false, 'message' => 'Invalid username or password.'];
 }
-PHPEOF
 
-# functions.php
-cat > "${INSTALL_PATH}/includes/functions.php" <<'PHPEOF'
+function logout() {
+    startSession(); $_SESSION = [];
+    if (ini_get("session.use_cookies")) { $p=session_get_cookie_params(); setcookie(session_name(),'',time()-42000,$p["path"],$p["domain"],$p["secure"],$p["httponly"]); }
+    session_destroy(); header('Location: /index.php'); exit;
+}
+XEOF
+
+# ---- security.php ----
+cat > /opt/litepanel/includes/security.php << 'XEOF'
 <?php
-class SystemInfo {
-    public static function getCpuUsage() {
-        $load = sys_getloadavg();
-        $cores = (int)trim(shell_exec("nproc 2>/dev/null") ?: "1");
-        $usage = round(($load[0] / $cores) * 100, 1);
-        return min(100, $usage);
-    }
-
-    public static function getCpuInfo() {
-        $load = sys_getloadavg();
-        $cores = (int)trim(shell_exec("nproc 2>/dev/null") ?: "1");
-        $model = trim(shell_exec("grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2") ?: "Unknown");
-        return [
-            'model' => $model,
-            'cores' => $cores,
-            'load' => $load,
-            'usage' => self::getCpuUsage()
-        ];
-    }
-
-    public static function getMemoryInfo() {
-        $free = shell_exec("free -b 2>/dev/null");
-        if (!$free) return ['total' => 0, 'used' => 0, 'free' => 0, 'percent' => 0];
-
-        preg_match('/Mem:\s+(\d+)\s+(\d+)\s+(\d+)/', $free, $matches);
-        if (count($matches) < 4) return ['total' => 0, 'used' => 0, 'free' => 0, 'percent' => 0];
-
-        $total = (int)$matches[1];
-        $used = (int)$matches[2];
-        $free_mem = (int)$matches[3];
-        $percent = $total > 0 ? round(($used / $total) * 100, 1) : 0;
-
-        return [
-            'total' => self::formatBytes($total),
-            'used' => self::formatBytes($used),
-            'free' => self::formatBytes($free_mem),
-            'percent' => $percent
-        ];
-    }
-
-    public static function getDiskInfo() {
-        $total = disk_total_space('/');
-        $free = disk_free_space('/');
-        $used = $total - $free;
-        $percent = $total > 0 ? round(($used / $total) * 100, 1) : 0;
-
-        return [
-            'total' => self::formatBytes($total),
-            'used' => self::formatBytes($used),
-            'free' => self::formatBytes($free),
-            'percent' => $percent
-        ];
-    }
-
-    public static function getServiceStatus($service) {
-        $output = trim(shell_exec("systemctl is-active " . escapeshellarg($service) . " 2>/dev/null") ?: "");
-        return $output === 'active';
-    }
-
-    public static function getUptime() {
-        $uptime = (float)trim(shell_exec("cat /proc/uptime 2>/dev/null | awk '{print $1}'") ?: "0");
-        $days = floor($uptime / 86400);
-        $hours = floor(($uptime % 86400) / 3600);
-        $minutes = floor(($uptime % 3600) / 60);
-        return "${days}d ${hours}h ${minutes}m";
-    }
-
-    public static function formatBytes($bytes, $precision = 2) {
-        $units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        $bytes = max($bytes, 0);
-        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
-        $pow = min($pow, count($units) - 1);
-        return round($bytes / pow(1024, $pow), $precision) . ' ' . $units[$pow];
-    }
-
-    public static function getHostname() {
-        return trim(shell_exec("hostname 2>/dev/null") ?: "localhost");
-    }
-
-    public static function getOsInfo() {
-        return trim(shell_exec("lsb_release -ds 2>/dev/null") ?: "Ubuntu");
-    }
+function generateCsrfToken() { if(empty($_SESSION['csrf_token'])) $_SESSION['csrf_token']=bin2hex(random_bytes(32)); return $_SESSION['csrf_token']; }
+function validateCsrf($t) { return isset($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'],$t); }
+function securityHeaders() {
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('X-XSS-Protection: 1; mode=block');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
 }
+XEOF
+
+# ---- functions.php ----
+cat > /opt/litepanel/includes/functions.php << 'XEOF'
+<?php
+function getSystemInfo() {
+    $i = ['hostname'=>gethostname(),'os'=>php_uname('s').' '.php_uname('r'),'uptime'=>trim(shell_exec("uptime -p 2>/dev/null")?:'N/A'),'load'=>sys_getloadavg(),'cpu'=>(int)trim(shell_exec("nproc 2>/dev/null")?:'1')];
+    $f=shell_exec("free -b 2>/dev/null");
+    if(preg_match('/Mem:\s+(\d+)\s+(\d+)/',$f,$m)){$i['mem_total']=$m[1];$i['mem_used']=$m[2];$i['mem_percent']=round(($m[2]/$m[1])*100,1);}
+    else{$i['mem_total']=$i['mem_used']=$i['mem_percent']=0;}
+    $i['disk_total']=disk_total_space('/');$i['disk_free']=disk_free_space('/');$i['disk_used']=$i['disk_total']-$i['disk_free'];
+    $i['disk_percent']=round(($i['disk_used']/$i['disk_total'])*100,1);
+    return $i;
+}
+function formatBytes($b,$p=2){$u=['B','KB','MB','GB','TB'];$b=max($b,0);$pw=floor(($b?log($b):0)/log(1024));$pw=min($pw,count($u)-1);return round($b/(1024**$pw),$p).' '.$u[$pw];}
+function svcStatus($s){return trim(shell_exec("systemctl is-active ".escapeshellarg($s)." 2>/dev/null")?:'')==='active';}
+function flash($t,$m){$_SESSION['flash']=['type'=>$t,'msg'=>$m];}
+function getFlash(){if(isset($_SESSION['flash'])){$f=$_SESSION['flash'];unset($_SESSION['flash']);return $f;}return null;}
 
 class DomainManager {
     private $db;
-
-    public function __construct() {
-        $this->db = Database::getInstance();
+    public function __construct(){$this->db=Database::getInstance();}
+    public function list(){return $this->db->fetchAll("SELECT * FROM domains ORDER BY created_at DESC");}
+    public function add($dom){
+        $dom=preg_replace('/[^a-zA-Z0-9.\-]/','',$dom);
+        if(empty($dom))return['success'=>false,'msg'=>'Invalid domain'];
+        $dr="/var/www/{$dom}/public_html";
+        try{$this->db->query("INSERT INTO domains (domain,document_root) VALUES (?,?)",[$dom,$dr]);
+            if(!is_dir($dr)){mkdir($dr,0755,true);file_put_contents("{$dr}/index.html","<h1>Welcome to {$dom}</h1><p>Hosted on LitePanel</p>");chown($dr,'nobody');chgrp($dr,'nogroup');}
+            return['success'=>true,'msg'=>"Domain {$dom} added"];
+        }catch(\Exception $e){return['success'=>false,'msg'=>$e->getMessage()];}
     }
-
-    public function addDomain($domain) {
-        $domain = preg_replace('/[^a-zA-Z0-9\.\-]/', '', $domain);
-        if (empty($domain)) {
-            return ['success' => false, 'message' => 'Invalid domain name.'];
-        }
-
-        $existing = $this->db->fetchOne("SELECT id FROM domains WHERE domain_name = ?", [$domain]);
-        if ($existing) {
-            return ['success' => false, 'message' => 'Domain already exists.'];
-        }
-
-        $docRoot = "/home/{$domain}/public_html";
-        if (!is_dir($docRoot)) {
-            mkdir($docRoot, 0755, true);
-        }
-
-        file_put_contents("{$docRoot}/index.html", "<!DOCTYPE html><html><head><title>Welcome to {$domain}</title></head><body><h1>Welcome to {$domain}</h1><p>This site is hosted on LitePanel.</p></body></html>");
-        chown("/home/{$domain}", 'nobody');
-        chgrp("/home/{$domain}", 'nogroup');
-        chmod("/home/{$domain}", 0755);
-        chown($docRoot, 'nobody');
-        chgrp($docRoot, 'nogroup');
-
-        $this->createVhostConfig($domain, $docRoot);
-
-        $this->db->query(
-            "INSERT INTO domains (domain_name, document_root) VALUES (?, ?)",
-            [$domain, $docRoot]
-        );
-
-        shell_exec("sudo /usr/local/lsws/bin/lswsctrl restart 2>/dev/null &");
-
-        return ['success' => true, 'message' => "Domain {$domain} added successfully."];
-    }
-
-    public function removeDomain($domain) {
-        $domain = preg_replace('/[^a-zA-Z0-9\.\-]/', '', $domain);
-        $vhostConf = "/usr/local/lsws/conf/vhosts/{$domain}";
-        if (is_dir($vhostConf)) {
-            shell_exec("rm -rf " . escapeshellarg($vhostConf));
-        }
-
-        $this->removeVhostFromHttpd($domain);
-        $this->db->query("DELETE FROM domains WHERE domain_name = ?", [$domain]);
-        shell_exec("sudo /usr/local/lsws/bin/lswsctrl restart 2>/dev/null &");
-
-        return ['success' => true, 'message' => "Domain {$domain} removed."];
-    }
-
-    public function listDomains() {
-        return $this->db->fetchAll("SELECT * FROM domains ORDER BY created_at DESC");
-    }
-
-    private function createVhostConfig($domain, $docRoot) {
-        $vhostDir = "/usr/local/lsws/conf/vhosts/{$domain}";
-        if (!is_dir($vhostDir)) {
-            mkdir($vhostDir, 0755, true);
-        }
-
-        $vhostConf = "docRoot                   {$docRoot}
-vhDomain                  {$domain}
-enableGzip                1
-enableBr                  1
-
-index  {
-  useServer               0
-  indexFiles               index.php, index.html
-}
-
-scripthandler  {
-  add                     lsapi:lsphp81 php
-}
-
-extprocessor lsphp81 {
-  type                    lsapi
-  address                 uds://tmp/lshttpd/{$domain}_lsphp.sock
-  maxConns                10
-  env                     PHP_LSAPI_CHILDREN=10
-  initTimeout             60
-  retryTimeout            0
-  persistConn             1
-  pcKeepAliveTimeout      60
-  respBuffer              0
-  autoStart               2
-  path                    /usr/local/lsws/lsphp81/bin/lsphp
-  backlog                 100
-  instances               1
-  runOnStartUp            2
-}
-
-rewrite  {
-  enable                  1
-  autoLoadHtaccess        1
-}
-
-accesslog {$vhostDir}/access.log {
-  useServer               0
-  rollingSize             100M
-}
-
-errorlog {$vhostDir}/error.log {
-  useServer               0
-  logLevel                ERROR
-  rollingSize             10M
-}
-";
-        file_put_contents("{$vhostDir}/vhconf.conf", $vhostConf);
-
-        $this->addVhostToHttpd($domain);
-    }
-
-    private function addVhostToHttpd($domain) {
-        $httpdConf = "/usr/local/lsws/conf/httpd_config.conf";
-        $content = file_get_contents($httpdConf);
-
-        if (strpos($content, "member   {$domain}") !== false) {
-            return;
-        }
-
-        $vhostBlock = "
-virtualhost {$domain} {
-  vhRoot                  /usr/local/lsws/conf/vhosts/{$domain}/
-  configFile              /usr/local/lsws/conf/vhosts/{$domain}/vhconf.conf
-  allowSymbolLink         1
-  enableScript            1
-  restrained              1
-}
-";
-        $content .= $vhostBlock;
-
-        $listenerMap = "
-listener Default{
-  map                     {$domain} {$domain}
-}
-";
-
-        if (strpos($content, 'listener Default{') !== false || strpos($content, 'listener Default {') !== false) {
-            $content = preg_replace(
-                '/(listener\s+Default\s*\{)/s',
-                "$1\n  map                     {$domain} {$domain}",
-                $content,
-                1
-            );
-        }
-
-        file_put_contents($httpdConf, $content);
-    }
-
-    private function removeVhostFromHttpd($domain) {
-        $httpdConf = "/usr/local/lsws/conf/httpd_config.conf";
-        $content = file_get_contents($httpdConf);
-
-        $content = preg_replace("/virtualhost\s+{$domain}\s*\{[^}]*\}\s*/s", '', $content);
-        $content = preg_replace("/\s*map\s+{$domain}\s+{$domain}\s*/", "\n", $content);
-
-        file_put_contents($httpdConf, $content);
-    }
+    public function remove($id){$this->db->query("DELETE FROM domains WHERE id=?",[(int)$id]);return['success'=>true,'msg'=>'Domain removed'];}
 }
 
 class DatabaseManager {
     private $db;
-
-    public function __construct() {
-        $this->db = Database::getInstance();
+    public function __construct(){$this->db=Database::getInstance();}
+    public function listDbs(){
+        $r=$this->db->fetchAll("SHOW DATABASES");$skip=['information_schema','performance_schema','mysql','sys'];$out=[];
+        foreach($r as $row){$n=reset($row);if(!in_array($n,$skip))$out[]=$n;}return $out;
     }
-
-    public function listDatabases() {
-        $result = $this->db->fetchAll("SHOW DATABASES");
-        $systemDbs = ['information_schema', 'performance_schema', 'mysql', 'sys'];
-        $databases = [];
-        foreach ($result as $row) {
-            $dbName = reset($row);
-            if (!in_array($dbName, $systemDbs)) {
-                $databases[] = $dbName;
-            }
-        }
-        return $databases;
+    public function listUsers(){return $this->db->fetchAll("SELECT User,Host FROM mysql.user WHERE User NOT IN ('root','mysql','mariadb.sys','debian-sys-maint') ORDER BY User");}
+    public function createDb($name){
+        $name=preg_replace('/[^a-zA-Z0-9_]/','',$name);if(empty($name))return['success'=>false,'msg'=>'Invalid name'];
+        try{$this->db->query("CREATE DATABASE IF NOT EXISTS `{$name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");return['success'=>true,'msg'=>"Database {$name} created"];}
+        catch(\Exception $e){return['success'=>false,'msg'=>$e->getMessage()];}
     }
-
-    public function createDatabase($name) {
-        $name = preg_replace('/[^a-zA-Z0-9_]/', '', $name);
-        if (empty($name)) {
-            return ['success' => false, 'message' => 'Invalid database name.'];
-        }
-        try {
-            $this->db->query("CREATE DATABASE IF NOT EXISTS `{$name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
-            return ['success' => true, 'message' => "Database {$name} created."];
-        } catch (Exception $e) {
-            return ['success' => false, 'message' => $e->getMessage()];
-        }
+    public function dropDb($name){
+        $name=preg_replace('/[^a-zA-Z0-9_]/','',$name);
+        if(in_array($name,['litepanel_db','mysql','information_schema','performance_schema','sys']))return['success'=>false,'msg'=>'Protected database'];
+        try{$this->db->query("DROP DATABASE IF EXISTS `{$name}`");return['success'=>true,'msg'=>"Database {$name} dropped"];}
+        catch(\Exception $e){return['success'=>false,'msg'=>$e->getMessage()];}
     }
-
-    public function dropDatabase($name) {
-        $name = preg_replace('/[^a-zA-Z0-9_]/', '', $name);
-        $protected = ['litepanel_db', 'mysql', 'information_schema', 'performance_schema', 'sys'];
-        if (in_array($name, $protected)) {
-            return ['success' => false, 'message' => 'Cannot drop protected database.'];
-        }
-        try {
-            $this->db->query("DROP DATABASE IF EXISTS `{$name}`");
-            return ['success' => true, 'message' => "Database {$name} dropped."];
-        } catch (Exception $e) {
-            return ['success' => false, 'message' => $e->getMessage()];
-        }
-    }
-
-    public function listUsers() {
-        return $this->db->fetchAll("SELECT User, Host FROM mysql.user WHERE User NOT IN ('root', 'mysql', 'mariadb.sys', 'debian-sys-maint') ORDER BY User");
-    }
-
-    public function createUser($username, $password, $database) {
-        $username = preg_replace('/[^a-zA-Z0-9_]/', '', $username);
-        $database = preg_replace('/[^a-zA-Z0-9_]/', '', $database);
-        if (empty($username) || empty($password)) {
-            return ['success' => false, 'message' => 'Invalid username or password.'];
-        }
-        try {
-            $this->db->query("CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED BY ?", [$username, $password]);
-            if (!empty($database)) {
-                $this->db->query("GRANT ALL PRIVILEGES ON `{$database}`.* TO ?@'localhost'", [$username]);
-            }
-            $this->db->query("FLUSH PRIVILEGES");
-            return ['success' => true, 'message' => "User {$username} created."];
-        } catch (Exception $e) {
-            return ['success' => false, 'message' => $e->getMessage()];
-        }
+    public function createUser($user,$pass,$dbname=''){
+        $user=preg_replace('/[^a-zA-Z0-9_]/','',$user);if(empty($user)||empty($pass))return['success'=>false,'msg'=>'Invalid input'];
+        try{$this->db->query("CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED BY ?",[$user,$pass]);
+            if(!empty($dbname)){$dbname=preg_replace('/[^a-zA-Z0-9_]/','',$dbname);$this->db->query("GRANT ALL ON `{$dbname}`.* TO ?@'localhost'",[$user]);}
+            $this->db->query("FLUSH PRIVILEGES");return['success'=>true,'msg'=>"User {$user} created"];}
+        catch(\Exception $e){return['success'=>false,'msg'=>$e->getMessage()];}
     }
 }
-
-class FileManager {
-    private $baseDir;
-
-    public function __construct($baseDir = '/home') {
-        $this->baseDir = realpath($baseDir) ?: $baseDir;
-    }
-
-    public function listFiles($path = '') {
-        $fullPath = $this->resolvePath($path);
-        if (!$fullPath || !is_dir($fullPath)) {
-            return ['success' => false, 'message' => 'Invalid directory.', 'files' => []];
-        }
-
-        $items = [];
-        $entries = scandir($fullPath);
-        foreach ($entries as $entry) {
-            if ($entry === '.') continue;
-            $fp = $fullPath . '/' . $entry;
-            $items[] = [
-                'name' => $entry,
-                'type' => is_dir($fp) ? 'dir' : 'file',
-                'size' => is_file($fp) ? SystemInfo::formatBytes(filesize($fp)) : '-',
-                'modified' => date('Y-m-d H:i:s', filemtime($fp)),
-                'permissions' => substr(sprintf('%o', fileperms($fp)), -4),
-            ];
-        }
-
-        usort($items, function($a, $b) {
-            if ($a['name'] === '..') return -1;
-            if ($b['name'] === '..') return 1;
-            if ($a['type'] !== $b['type']) return $a['type'] === 'dir' ? -1 : 1;
-            return strcasecmp($a['name'], $b['name']);
-        });
-
-        return ['success' => true, 'path' => $fullPath, 'relative' => $path, 'files' => $items];
-    }
-
-    public function readFile($path) {
-        $fullPath = $this->resolvePath($path);
-        if (!$fullPath || !is_file($fullPath)) {
-            return ['success' => false, 'message' => 'File not found.'];
-        }
-        $size = filesize($fullPath);
-        if ($size > 2 * 1024 * 1024) {
-            return ['success' => false, 'message' => 'File too large to edit (max 2MB).'];
-        }
-        return ['success' => true, 'content' => file_get_contents($fullPath), 'path' => $path];
-    }
-
-    public function saveFile($path, $content) {
-        $fullPath = $this->resolvePath($path);
-        if (!$fullPath) {
-            return ['success' => false, 'message' => 'Invalid path.'];
-        }
-        file_put_contents($fullPath, $content);
-        return ['success' => true, 'message' => 'File saved.'];
-    }
-
-    public function createDirectory($path, $name) {
-        $name = preg_replace('/[^a-zA-Z0-9_\.\-]/', '', $name);
-        $fullPath = $this->resolvePath($path);
-        if (!$fullPath || !is_dir($fullPath)) {
-            return ['success' => false, 'message' => 'Invalid path.'];
-        }
-        $newDir = $fullPath . '/' . $name;
-        if (!is_dir($newDir)) {
-            mkdir($newDir, 0755, true);
-        }
-        return ['success' => true, 'message' => "Directory {$name} created."];
-    }
-
-    public function deleteItem($path) {
-        $fullPath = $this->resolvePath($path);
-        if (!$fullPath || $fullPath === $this->baseDir) {
-            return ['success' => false, 'message' => 'Cannot delete this item.'];
-        }
-        if (is_dir($fullPath)) {
-            shell_exec("rm -rf " . escapeshellarg($fullPath));
-        } else {
-            unlink($fullPath);
-        }
-        return ['success' => true, 'message' => 'Deleted successfully.'];
-    }
-
-    private function resolvePath($path) {
-        $path = str_replace(['../', '..\\'], '', $path);
-        $full = realpath($this->baseDir . '/' . $path);
-        if (!$full) {
-            $full = $this->baseDir . '/' . $path;
-        }
-        if (strpos($full, $this->baseDir) !== 0) {
-            return false;
-        }
-        return $full;
-    }
-}
-PHPEOF
-
-# header.php
-cat > "${INSTALL_PATH}/includes/header.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/config.php';
-require_once __DIR__ . '/database.php';
-require_once __DIR__ . '/auth.php';
-require_once __DIR__ . '/functions.php';
-
-ini_set('session.cookie_httponly', 1);
-ini_set('session.cookie_samesite', 'Strict');
-ini_set('session.use_strict_mode', 1);
-ini_set('session.save_path', INSTALL_PATH . '/sessions');
-
-session_name(SESSION_NAME);
-session_start();
-
-$auth = new Auth();
-
-function e($str) {
-    return htmlspecialchars($str, ENT_QUOTES, 'UTF-8');
-}
-PHPEOF
-
-# CSS/Theme asset
-cat > "${INSTALL_PATH}/public/style.css" <<'CSSEOF'
-:root {
-    --primary: #2563eb;
-    --primary-dark: #1d4ed8;
-    --bg: #0f172a;
-    --bg-card: #1e293b;
-    --bg-sidebar: #1a2332;
-    --text: #e2e8f0;
-    --text-muted: #94a3b8;
-    --border: #334155;
-    --success: #22c55e;
-    --danger: #ef4444;
-    --warning: #f59e0b;
-    --info: #3b82f6;
-}
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    line-height: 1.6;
-}
-.login-wrapper {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-}
-.login-box {
-    background: var(--bg-card);
-    border-radius: 16px;
-    padding: 40px;
-    width: 400px;
-    max-width: 95%;
-    box-shadow: 0 25px 50px rgba(0,0,0,0.4);
-    border: 1px solid var(--border);
-}
-.login-box h1 {
-    text-align: center;
-    font-size: 28px;
-    margin-bottom: 8px;
-    background: linear-gradient(135deg, #60a5fa, #a78bfa);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-.login-box .subtitle {
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 14px;
-    margin-bottom: 30px;
-}
-.form-group { margin-bottom: 20px; }
-.form-group label {
-    display: block;
-    margin-bottom: 6px;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text-muted);
-}
-.form-group input, .form-group select, .form-group textarea {
-    width: 100%;
-    padding: 12px 16px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--text);
-    font-size: 14px;
-    transition: border-color 0.2s;
-}
-.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(37,99,235,0.2);
-}
-.btn {
-    display: inline-block;
-    padding: 12px 24px;
-    border: none;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-    text-decoration: none;
-    text-align: center;
-}
-.btn-primary { background: var(--primary); color: #fff; width: 100%; }
-.btn-primary:hover { background: var(--primary-dark); transform: translateY(-1px); }
-.btn-success { background: var(--success); color: #fff; }
-.btn-success:hover { opacity: 0.9; }
-.btn-danger { background: var(--danger); color: #fff; }
-.btn-danger:hover { opacity: 0.9; }
-.btn-sm { padding: 6px 14px; font-size: 12px; }
-.alert {
-    padding: 12px 16px;
-    border-radius: 8px;
-    margin-bottom: 20px;
-    font-size: 14px;
-    border: 1px solid;
-}
-.alert-error { background: rgba(239,68,68,0.1); border-color: var(--danger); color: #fca5a5; }
-.alert-success { background: rgba(34,197,94,0.1); border-color: var(--success); color: #86efac; }
-.alert-info { background: rgba(59,130,246,0.1); border-color: var(--info); color: #93c5fd; }
-.layout { display: flex; min-height: 100vh; }
-.sidebar {
-    width: 260px;
-    background: var(--bg-sidebar);
-    border-right: 1px solid var(--border);
-    padding: 20px 0;
-    position: fixed;
-    height: 100vh;
-    overflow-y: auto;
-}
-.sidebar-brand {
-    padding: 0 20px 20px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 10px;
-}
-.sidebar-brand h2 {
-    font-size: 22px;
-    background: linear-gradient(135deg, #60a5fa, #a78bfa);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-.sidebar-brand small { color: var(--text-muted); font-size: 11px; }
-.nav-menu { list-style: none; }
-.nav-menu li a {
-    display: flex;
-    align-items: center;
-    padding: 12px 24px;
-    color: var(--text-muted);
-    text-decoration: none;
-    font-size: 14px;
-    transition: all 0.2s;
-    border-left: 3px solid transparent;
-}
-.nav-menu li a:hover, .nav-menu li a.active {
-    background: rgba(37,99,235,0.1);
-    color: var(--text);
-    border-left-color: var(--primary);
-}
-.nav-menu li a .icon { margin-right: 12px; font-size: 18px; width: 24px; text-align: center; }
-.main-content {
-    margin-left: 260px;
-    flex: 1;
-    padding: 30px;
-    min-height: 100vh;
-}
-.top-bar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 30px;
-    padding-bottom: 20px;
-    border-bottom: 1px solid var(--border);
-}
-.top-bar h1 { font-size: 24px; font-weight: 700; }
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 20px;
-    margin-bottom: 30px;
-}
-.stat-card {
-    background: var(--bg-card);
-    border-radius: 12px;
-    padding: 24px;
-    border: 1px solid var(--border);
-    transition: transform 0.2s;
-}
-.stat-card:hover { transform: translateY(-2px); }
-.stat-card .stat-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 12px;
-}
-.stat-card .stat-label { color: var(--text-muted); font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
-.stat-card .stat-icon { font-size: 24px; opacity: 0.7; }
-.stat-card .stat-value { font-size: 28px; font-weight: 700; }
-.stat-card .stat-detail { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
-.progress-bar {
-    width: 100%;
-    height: 8px;
-    background: var(--bg);
-    border-radius: 4px;
-    margin-top: 12px;
-    overflow: hidden;
-}
-.progress-bar .fill {
-    height: 100%;
-    border-radius: 4px;
-    transition: width 0.5s;
-}
-.fill-blue { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
-.fill-green { background: linear-gradient(90deg, #22c55e, #4ade80); }
-.fill-yellow { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
-.fill-red { background: linear-gradient(90deg, #ef4444, #f87171); }
-.card {
-    background: var(--bg-card);
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    margin-bottom: 20px;
-}
-.card-header {
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-.card-header h3 { font-size: 16px; font-weight: 600; }
-.card-body { padding: 24px; }
-table { width: 100%; border-collapse: collapse; }
-table th, table td {
-    padding: 12px 16px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    font-size: 14px;
-}
-table th { color: var(--text-muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-table tr:hover { background: rgba(255,255,255,0.02); }
-.badge {
-    display: inline-block;
-    padding: 4px 10px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-}
-.badge-success { background: rgba(34,197,94,0.15); color: #4ade80; }
-.badge-danger { background: rgba(239,68,68,0.15); color: #f87171; }
-.badge-info { background: rgba(59,130,246,0.15); color: #60a5fa; }
-.services-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
-    margin-top: 20px;
-}
-.service-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px;
-    background: var(--bg);
-    border-radius: 8px;
-    border: 1px solid var(--border);
-}
-.service-name { font-weight: 500; }
-.status-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 8px;
-}
-.status-dot.online { background: var(--success); box-shadow: 0 0 8px rgba(34,197,94,0.5); }
-.status-dot.offline { background: var(--danger); box-shadow: 0 0 8px rgba(239,68,68,0.5); }
-.file-browser { font-family: 'Courier New', monospace; }
-.breadcrumb { display: flex; gap: 4px; align-items: center; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; }
-.breadcrumb a { color: var(--primary); text-decoration: none; }
-.breadcrumb span { color: var(--text-muted); }
-.editor-area {
-    width: 100%;
-    min-height: 400px;
-    font-family: 'Courier New', monospace;
-    font-size: 13px;
-    line-height: 1.5;
-    resize: vertical;
-}
-.modal-overlay {
-    display: none;
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.7);
-    z-index: 1000;
-    justify-content: center;
-    align-items: center;
-}
-.modal-overlay.active { display: flex; }
-.modal {
-    background: var(--bg-card);
-    border-radius: 12px;
-    padding: 30px;
-    width: 500px;
-    max-width: 95%;
-    border: 1px solid var(--border);
-}
-.modal h3 { margin-bottom: 20px; }
-.inline-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-.inline-form .form-group { margin-bottom: 0; flex: 1; min-width: 200px; }
-@media (max-width: 768px) {
-    .sidebar { display: none; }
-    .main-content { margin-left: 0; padding: 16px; }
-    .stats-grid { grid-template-columns: 1fr; }
-    .inline-form { flex-direction: column; }
-}
-CSSEOF
-
-# index.php (login)
-cat > "${INSTALL_PATH}/public/index.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-
-if ($auth->isLoggedIn()) {
-    header('Location: /dashboard.php');
-    exit;
-}
-
-$error = '';
-$csrfToken = $auth->generateCsrfToken();
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = $_POST['csrf_token'] ?? '';
-    if (!$auth->validateCsrfToken($token)) {
-        $error = 'Invalid request. Please try again.';
-    } else {
-        $username = trim($_POST['username'] ?? '');
-        $password = $_POST['password'] ?? '';
-        $result = $auth->login($username, $password);
-        if ($result['success']) {
-            header('Location: /dashboard.php');
-            exit;
-        } else {
-            $error = $result['message'];
-        }
-    }
-    $csrfToken = $auth->generateCsrfToken();
-}
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LitePanel - Login</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="login-wrapper">
-    <div class="login-box">
-        <h1>&#128736; LitePanel</h1>
-        <p class="subtitle">Home Server Control Panel</p>
-        <?php if ($error): ?>
-            <div class="alert alert-error"><?php echo e($error); ?></div>
-        <?php endif; ?>
-        <form method="POST" action="">
-            <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-            <div class="form-group">
-                <label>Username</label>
-                <input type="text" name="username" required autofocus autocomplete="username">
-            </div>
-            <div class="form-group">
-                <label>Password</label>
-                <input type="password" name="password" required autocomplete="current-password">
-            </div>
-            <button type="submit" class="btn btn-primary">Sign In</button>
-        </form>
-    </div>
-</div>
-</body>
-</html>
-PHPEOF
-
-# dashboard.php
-cat > "${INSTALL_PATH}/public/dashboard.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-$auth->requireLogin();
-
-$cpu = SystemInfo::getCpuInfo();
-$mem = SystemInfo::getMemoryInfo();
-$disk = SystemInfo::getDiskInfo();
-$uptime = SystemInfo::getUptime();
-$hostname = SystemInfo::getHostname();
-$osInfo = SystemInfo::getOsInfo();
-
-$services = [
-    'lsws' => ['name' => 'OpenLiteSpeed', 'status' => SystemInfo::getServiceStatus('lsws')],
-    'mariadb' => ['name' => 'MariaDB', 'status' => SystemInfo::getServiceStatus('mariadb')],
-    'cloudflared' => ['name' => 'Cloudflare Tunnel', 'status' => SystemInfo::getServiceStatus('cloudflared')],
-    'fail2ban' => ['name' => 'Fail2Ban', 'status' => SystemInfo::getServiceStatus('fail2ban')],
-    'ufw' => ['name' => 'UFW Firewall', 'status' => SystemInfo::getServiceStatus('ufw')],
-];
-
-$domainMgr = new DomainManager();
-$domainCount = count($domainMgr->listDomains());
-$dbMgr = new DatabaseManager();
-$dbCount = count($dbMgr->listDatabases());
-
-function getBarColor($pct) {
-    if ($pct > 90) return 'fill-red';
-    if ($pct > 70) return 'fill-yellow';
-    if ($pct > 40) return 'fill-blue';
-    return 'fill-green';
-}
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LitePanel - Dashboard</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="layout">
-    <?php include __DIR__ . '/../includes/sidebar.php'; ?>
-    <div class="main-content">
-        <div class="top-bar">
-            <h1>Dashboard</h1>
-            <div>
-                <span style="color:var(--text-muted);font-size:13px;">
-                    <?php echo e($hostname); ?> &bull; <?php echo e($osInfo); ?> &bull; Uptime: <?php echo e($uptime); ?>
-                </span>
-            </div>
-        </div>
-
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-header">
-                    <span class="stat-label">CPU Usage</span>
-                    <span class="stat-icon">&#9889;</span>
-                </div>
-                <div class="stat-value"><?php echo $cpu['usage']; ?>%</div>
-                <div class="stat-detail"><?php echo e($cpu['model']); ?> (<?php echo $cpu['cores']; ?> cores)</div>
-                <div class="progress-bar"><div class="fill <?php echo getBarColor($cpu['usage']); ?>" style="width:<?php echo $cpu['usage']; ?>%"></div></div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-header">
-                    <span class="stat-label">Memory</span>
-                    <span class="stat-icon">&#128200;</span>
-                </div>
-                <div class="stat-value"><?php echo $mem['percent']; ?>%</div>
-                <div class="stat-detail"><?php echo $mem['used']; ?> / <?php echo $mem['total']; ?></div>
-                <div class="progress-bar"><div class="fill <?php echo getBarColor($mem['percent']); ?>" style="width:<?php echo $mem['percent']; ?>%"></div></div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-header">
-                    <span class="stat-label">Disk</span>
-                    <span class="stat-icon">&#128451;</span>
-                </div>
-                <div class="stat-value"><?php echo $disk['percent']; ?>%</div>
-                <div class="stat-detail"><?php echo $disk['used']; ?> / <?php echo $disk['total']; ?></div>
-                <div class="progress-bar"><div class="fill <?php echo getBarColor($disk['percent']); ?>" style="width:<?php echo $disk['percent']; ?>%"></div></div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-header">
-                    <span class="stat-label">Overview</span>
-                    <span class="stat-icon">&#127760;</span>
-                </div>
-                <div class="stat-value"><?php echo $domainCount; ?></div>
-                <div class="stat-detail">Domains &bull; <?php echo $dbCount; ?> Databases</div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>&#128994; Services Status</h3></div>
-            <div class="card-body">
-                <div class="services-grid">
-                    <?php foreach ($services as $svc): ?>
-                    <div class="service-item">
-                        <span class="service-name"><?php echo e($svc['name']); ?></span>
-                        <span>
-                            <span class="status-dot <?php echo $svc['status'] ? 'online' : 'offline'; ?>"></span>
-                            <?php echo $svc['status'] ? 'Running' : 'Stopped'; ?>
-                        </span>
-                    </div>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-</body>
-</html>
-PHPEOF
-
-# sidebar.php
-cat > "${INSTALL_PATH}/includes/sidebar.php" <<'PHPEOF'
-<div class="sidebar">
-    <div class="sidebar-brand">
-        <h2>&#128736; LitePanel</h2>
-        <small>v<?php echo PANEL_VERSION; ?> &bull; Home Server</small>
-    </div>
-    <ul class="nav-menu">
-        <li><a href="/dashboard.php" class="<?php echo basename($_SERVER['PHP_SELF']) === 'dashboard.php' ? 'active' : ''; ?>"><span class="icon">&#127968;</span> Dashboard</a></li>
-        <li><a href="/domains.php" class="<?php echo basename($_SERVER['PHP_SELF']) === 'domains.php' ? 'active' : ''; ?>"><span class="icon">&#127760;</span> Domains</a></li>
-        <li><a href="/databases.php" class="<?php echo basename($_SERVER['PHP_SELF']) === 'databases.php' ? 'active' : ''; ?>"><span class="icon">&#128451;</span> Databases</a></li>
-        <li><a href="/filemanager.php" class="<?php echo basename($_SERVER['PHP_SELF']) === 'filemanager.php' ? 'active' : ''; ?>"><span class="icon">&#128193;</span> File Manager</a></li>
-        <li><a href="/ssl.php" class="<?php echo basename($_SERVER['PHP_SELF']) === 'ssl.php' ? 'active' : ''; ?>"><span class="icon">&#128274;</span> SSL / Tunnel</a></li>
-        <li><a href="/phpmyadmin/" target="_blank"><span class="icon">&#128202;</span> phpMyAdmin</a></li>
-        <li><a href="/logout.php"><span class="icon">&#128682;</span> Logout</a></li>
-    </ul>
-</div>
-PHPEOF
-
-# domains.php
-cat > "${INSTALL_PATH}/public/domains.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-$auth->requireLogin();
-$csrfToken = $auth->generateCsrfToken();
-$domainMgr = new DomainManager();
-$message = '';
-$msgType = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = $_POST['csrf_token'] ?? '';
-    if (!$auth->validateCsrfToken($token)) {
-        $message = 'Invalid request.';
-        $msgType = 'error';
-    } else {
-        $action = $_POST['action'] ?? '';
-        if ($action === 'add') {
-            $result = $domainMgr->addDomain($_POST['domain'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        } elseif ($action === 'remove') {
-            $result = $domainMgr->removeDomain($_POST['domain'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        }
-    }
-    $csrfToken = $auth->generateCsrfToken();
-}
-
-$domains = $domainMgr->listDomains();
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LitePanel - Domains</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="layout">
-    <?php include __DIR__ . '/../includes/sidebar.php'; ?>
-    <div class="main-content">
-        <div class="top-bar"><h1>Domain Management</h1></div>
-
-        <?php if ($message): ?>
-            <div class="alert alert-<?php echo $msgType; ?>"><?php echo e($message); ?></div>
-        <?php endif; ?>
-
-        <div class="card">
-            <div class="card-header"><h3>Add Domain</h3></div>
-            <div class="card-body">
-                <form method="POST" class="inline-form">
-                    <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                    <input type="hidden" name="action" value="add">
-                    <div class="form-group">
-                        <label>Domain Name</label>
-                        <input type="text" name="domain" placeholder="example.com" required>
-                    </div>
-                    <button type="submit" class="btn btn-success">Add Domain</button>
-                </form>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>Domains (<?php echo count($domains); ?>)</h3></div>
-            <div class="card-body">
-                <?php if (empty($domains)): ?>
-                    <p style="color:var(--text-muted)">No domains configured.</p>
-                <?php else: ?>
-                <table>
-                    <thead><tr><th>Domain</th><th>Document Root</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
-                    <tbody>
-                    <?php foreach ($domains as $d): ?>
-                    <tr>
-                        <td><strong><?php echo e($d['domain_name']); ?></strong></td>
-                        <td><code><?php echo e($d['document_root']); ?></code></td>
-                        <td><span class="badge badge-<?php echo $d['status'] === 'active' ? 'success' : 'danger'; ?>"><?php echo e($d['status']); ?></span></td>
-                        <td><?php echo e($d['created_at']); ?></td>
-                        <td>
-                            <form method="POST" style="display:inline" onsubmit="return confirm('Remove this domain?');">
-                                <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                                <input type="hidden" name="action" value="remove">
-                                <input type="hidden" name="domain" value="<?php echo e($d['domain_name']); ?>">
-                                <button type="submit" class="btn btn-danger btn-sm">Remove</button>
-                            </form>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-                <?php endif; ?>
-            </div>
-        </div>
-    </div>
-</div>
-</body>
-</html>
-PHPEOF
-
-# databases.php
-cat > "${INSTALL_PATH}/public/databases.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-$auth->requireLogin();
-$csrfToken = $auth->generateCsrfToken();
-$dbMgr = new DatabaseManager();
-$message = '';
-$msgType = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = $_POST['csrf_token'] ?? '';
-    if (!$auth->validateCsrfToken($token)) {
-        $message = 'Invalid request.';
-        $msgType = 'error';
-    } else {
-        $action = $_POST['action'] ?? '';
-        if ($action === 'create_db') {
-            $result = $dbMgr->createDatabase($_POST['dbname'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        } elseif ($action === 'drop_db') {
-            $result = $dbMgr->dropDatabase($_POST['dbname'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        } elseif ($action === 'create_user') {
-            $result = $dbMgr->createUser($_POST['db_username'] ?? '', $_POST['db_password'] ?? '', $_POST['db_grant'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        }
-    }
-    $csrfToken = $auth->generateCsrfToken();
-}
-
-$databases = $dbMgr->listDatabases();
-$users = $dbMgr->listUsers();
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LitePanel - Databases</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="layout">
-    <?php include __DIR__ . '/../includes/sidebar.php'; ?>
-    <div class="main-content">
-        <div class="top-bar"><h1>Database Management</h1></div>
-
-        <?php if ($message): ?>
-            <div class="alert alert-<?php echo $msgType; ?>"><?php echo e($message); ?></div>
-        <?php endif; ?>
-
-        <div class="card">
-            <div class="card-header"><h3>Create Database</h3></div>
-            <div class="card-body">
-                <form method="POST" class="inline-form">
-                    <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                    <input type="hidden" name="action" value="create_db">
-                    <div class="form-group">
-                        <label>Database Name</label>
-                        <input type="text" name="dbname" required pattern="[a-zA-Z0-9_]+" title="Alphanumeric and underscore only">
-                    </div>
-                    <button type="submit" class="btn btn-success">Create</button>
-                </form>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>Create Database User</h3></div>
-            <div class="card-body">
-                <form method="POST" class="inline-form">
-                    <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                    <input type="hidden" name="action" value="create_user">
-                    <div class="form-group">
-                        <label>Username</label>
-                        <input type="text" name="db_username" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Password</label>
-                        <input type="text" name="db_password" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Grant to Database</label>
-                        <select name="db_grant">
-                            <option value="">-- None --</option>
-                            <?php foreach ($databases as $db): ?>
-                            <option value="<?php echo e($db); ?>"><?php echo e($db); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <button type="submit" class="btn btn-success">Create User</button>
-                </form>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>Databases (<?php echo count($databases); ?>)</h3></div>
-            <div class="card-body">
-                <table>
-                    <thead><tr><th>Database Name</th><th>Actions</th></tr></thead>
-                    <tbody>
-                    <?php foreach ($databases as $db): ?>
-                    <tr>
-                        <td><strong><?php echo e($db); ?></strong></td>
-                        <td>
-                            <form method="POST" style="display:inline" onsubmit="return confirm('Drop database <?php echo e($db); ?>?');">
-                                <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                                <input type="hidden" name="action" value="drop_db">
-                                <input type="hidden" name="dbname" value="<?php echo e($db); ?>">
-                                <button type="submit" class="btn btn-danger btn-sm">Drop</button>
-                            </form>
-                            <a href="/phpmyadmin/" target="_blank" class="btn btn-primary btn-sm" style="color:#fff;margin-left:5px;">phpMyAdmin</a>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>Database Users</h3></div>
-            <div class="card-body">
-                <table>
-                    <thead><tr><th>Username</th><th>Host</th></tr></thead>
-                    <tbody>
-                    <?php foreach ($users as $u): ?>
-                    <tr><td><?php echo e($u['User']); ?></td><td><?php echo e($u['Host']); ?></td></tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-</div>
-</body>
-</html>
-PHPEOF
-
-# filemanager.php
-cat > "${INSTALL_PATH}/public/filemanager.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-$auth->requireLogin();
-$csrfToken = $auth->generateCsrfToken();
-$fm = new FileManager('/home');
-$message = '';
-$msgType = '';
-$editMode = false;
-$editContent = '';
-$editPath = '';
-
-$currentPath = $_GET['path'] ?? '';
-$currentPath = str_replace('../', '', $currentPath);
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = $_POST['csrf_token'] ?? '';
-    if ($auth->validateCsrfToken($token)) {
-        $action = $_POST['action'] ?? '';
-        if ($action === 'mkdir') {
-            $result = $fm->createDirectory($currentPath, $_POST['dirname'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        } elseif ($action === 'delete') {
-            $result = $fm->deleteItem($_POST['filepath'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        } elseif ($action === 'save') {
-            $result = $fm->saveFile($_POST['filepath'] ?? '', $_POST['content'] ?? '');
-            $message = $result['message'];
-            $msgType = $result['success'] ? 'success' : 'error';
-        }
-    }
-    $csrfToken = $auth->generateCsrfToken();
-}
-
-if (isset($_GET['edit'])) {
-    $editData = $fm->readFile($_GET['edit']);
-    if ($editData['success']) {
-        $editMode = true;
-        $editContent = $editData['content'];
-        $editPath = $_GET['edit'];
-    } else {
-        $message = $editData['message'];
-        $msgType = 'error';
-    }
-}
-
-$listing = $fm->listFiles($currentPath);
-
-function buildBreadcrumb($path) {
-    $parts = array_filter(explode('/', $path));
-    $crumbs = [['name' => 'Home', 'path' => '']];
-    $accumulated = '';
-    foreach ($parts as $part) {
-        $accumulated .= ($accumulated ? '/' : '') . $part;
-        $crumbs[] = ['name' => $part, 'path' => $accumulated];
-    }
-    return $crumbs;
-}
-$breadcrumbs = buildBreadcrumb($currentPath);
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LitePanel - File Manager</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="layout">
-    <?php include __DIR__ . '/../includes/sidebar.php'; ?>
-    <div class="main-content">
-        <div class="top-bar"><h1>File Manager</h1></div>
-
-        <?php if ($message): ?>
-            <div class="alert alert-<?php echo $msgType; ?>"><?php echo e($message); ?></div>
-        <?php endif; ?>
-
-        <?php if ($editMode): ?>
-        <div class="card">
-            <div class="card-header">
-                <h3>Editing: <?php echo e($editPath); ?></h3>
-                <a href="/filemanager.php?path=<?php echo e($currentPath); ?>" class="btn btn-sm btn-primary" style="color:#fff">Back</a>
-            </div>
-            <div class="card-body">
-                <form method="POST">
-                    <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                    <input type="hidden" name="action" value="save">
-                    <input type="hidden" name="filepath" value="<?php echo e($editPath); ?>">
-                    <div class="form-group">
-                        <textarea name="content" class="editor-area"><?php echo e($editContent); ?></textarea>
-                    </div>
-                    <button type="submit" class="btn btn-success">Save File</button>
-                </form>
-            </div>
-        </div>
-        <?php else: ?>
-        <div class="card">
-            <div class="card-header">
-                <h3>
-                    <div class="breadcrumb">
-                        <?php foreach ($breadcrumbs as $i => $crumb): ?>
-                            <?php if ($i > 0): ?><span>/</span><?php endif; ?>
-                            <a href="/filemanager.php?path=<?php echo urlencode($crumb['path']); ?>"><?php echo e($crumb['name']); ?></a>
-                        <?php endforeach; ?>
-                    </div>
-                </h3>
-                <form method="POST" class="inline-form" style="gap:5px">
-                    <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                    <input type="hidden" name="action" value="mkdir">
-                    <input type="text" name="dirname" placeholder="New folder" style="width:150px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px" required>
-                    <button type="submit" class="btn btn-success btn-sm">Create Dir</button>
-                </form>
-            </div>
-            <div class="card-body file-browser">
-                <table>
-                    <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Perms</th><th>Actions</th></tr></thead>
-                    <tbody>
-                    <?php if ($listing['success']): ?>
-                        <?php foreach ($listing['files'] as $file): ?>
-                        <tr>
-                            <td>
-                                <?php if ($file['type'] === 'dir'): ?>
-                                    &#128193; <a href="/filemanager.php?path=<?php echo urlencode(trim($currentPath . '/' . $file['name'], '/')); ?>" style="color:var(--primary);text-decoration:none"><?php echo e($file['name']); ?></a>
-                                <?php else: ?>
-                                    &#128196; <?php echo e($file['name']); ?>
-                                <?php endif; ?>
-                            </td>
-                            <td><?php echo e($file['size']); ?></td>
-                            <td><?php echo e($file['modified']); ?></td>
-                            <td><code><?php echo e($file['permissions']); ?></code></td>
-                            <td>
-                                <?php if ($file['name'] !== '..'): ?>
-                                    <?php if ($file['type'] === 'file'): ?>
-                                        <a href="/filemanager.php?path=<?php echo urlencode($currentPath); ?>&edit=<?php echo urlencode(trim($currentPath . '/' . $file['name'], '/')); ?>" class="btn btn-primary btn-sm" style="color:#fff">Edit</a>
-                                    <?php endif; ?>
-                                    <form method="POST" style="display:inline" onsubmit="return confirm('Delete <?php echo e($file['name']); ?>?');">
-                                        <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                                        <input type="hidden" name="action" value="delete">
-                                        <input type="hidden" name="filepath" value="<?php echo e(trim($currentPath . '/' . $file['name'], '/')); ?>">
-                                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                                    </form>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <?php endif; ?>
-    </div>
-</div>
-</body>
-</html>
-PHPEOF
-
-# ssl.php
-cat > "${INSTALL_PATH}/public/ssl.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-$auth->requireLogin();
-$csrfToken = $auth->generateCsrfToken();
-$message = '';
-$msgType = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = $_POST['csrf_token'] ?? '';
-    if ($auth->validateCsrfToken($token)) {
-        $action = $_POST['action'] ?? '';
-        if ($action === 'restart_tunnel') {
-            shell_exec('sudo systemctl restart cloudflared 2>&1');
-            $message = 'Cloudflare tunnel restarted.';
-            $msgType = 'success';
-        } elseif ($action === 'restart_ols') {
-            shell_exec('sudo /usr/local/lsws/bin/lswsctrl restart 2>&1');
-            $message = 'OpenLiteSpeed restarted.';
-            $msgType = 'success';
-        }
-    }
-    $csrfToken = $auth->generateCsrfToken();
-}
-
-$tunnelStatus = trim(shell_exec('systemctl is-active cloudflared 2>/dev/null') ?: 'unknown');
-$tunnelConfig = '';
-if (file_exists('/etc/cloudflared/config.yml')) {
-    $tunnelConfig = file_get_contents('/etc/cloudflared/config.yml');
-}
-?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LitePanel - SSL & Tunnel</title>
-    <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-<div class="layout">
-    <?php include __DIR__ . '/../includes/sidebar.php'; ?>
-    <div class="main-content">
-        <div class="top-bar"><h1>SSL & Cloudflare Tunnel</h1></div>
-
-        <?php if ($message): ?>
-            <div class="alert alert-<?php echo $msgType; ?>"><?php echo e($message); ?></div>
-        <?php endif; ?>
-
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-header">
-                    <span class="stat-label">Tunnel Status</span>
-                    <span class="stat-icon">&#128272;</span>
-                </div>
-                <div class="stat-value">
-                    <span class="status-dot <?php echo $tunnelStatus === 'active' ? 'online' : 'offline'; ?>"></span>
-                    <?php echo e(ucfirst($tunnelStatus)); ?>
-                </div>
-                <div class="stat-detail">Cloudflare Tunnel provides automatic SSL</div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>Service Controls</h3></div>
-            <div class="card-body">
-                <div class="inline-form" style="gap:10px">
-                    <form method="POST">
-                        <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                        <input type="hidden" name="action" value="restart_tunnel">
-                        <button type="submit" class="btn btn-primary">Restart Tunnel</button>
-                    </form>
-                    <form method="POST">
-                        <input type="hidden" name="csrf_token" value="<?php echo e($csrfToken); ?>">
-                        <input type="hidden" name="action" value="restart_ols">
-                        <button type="submit" class="btn btn-success">Restart OLS</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>Tunnel Configuration</h3></div>
-            <div class="card-body">
-                <pre style="background:var(--bg);padding:16px;border-radius:8px;overflow-x:auto;font-size:13px;border:1px solid var(--border)"><?php echo e($tunnelConfig ?: 'Configuration file not found.'); ?></pre>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>&#128274; SSL Information</h3></div>
-            <div class="card-body">
-                <div class="alert alert-info">
-                    <strong>Cloudflare Tunnel provides automatic SSL/TLS.</strong><br>
-                    All traffic through Cloudflare Tunnel is automatically encrypted with SSL certificates managed by Cloudflare.<br>
-                    No manual SSL certificate management is needed for domains routed through the tunnel.
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="card-header"><h3>&#128737; Zero Trust Security</h3></div>
-            <div class="card-body">
-                <div class="alert alert-info">
-                    <strong>Recommended: Enable Cloudflare Zero Trust Access</strong><br><br>
-                    To secure your panel with email-based authentication:<br><br>
-                    1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:var(--primary)">Cloudflare Zero Trust Dashboard</a><br>
-                    2. Navigate to <strong>Access &rarr; Applications</strong><br>
-                    3. Click <strong>Add an application</strong> &rarr; <strong>Self-hosted</strong><br>
-                    4. Set application domain to your panel subdomain<br>
-                    5. Add a policy: <strong>Allow</strong> &rarr; <strong>Emails</strong> &rarr; enter your email<br>
-                    6. Save and test access<br>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-</body>
-</html>
-PHPEOF
-
-# logout.php
-cat > "${INSTALL_PATH}/public/logout.php" <<'PHPEOF'
-<?php
-require_once __DIR__ . '/../includes/header.php';
-$auth->logout();
-header('Location: /index.php');
-exit;
-PHPEOF
+XEOF
+
+# ---- header.php ----
+cat > /opt/litepanel/includes/header.php << 'XEOF'
+<?php require_once __DIR__.'/auth.php'; requireLogin(); securityHeaders();
+$csrfToken=generateCsrfToken(); ?>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>LitePanel - <?php echo $pageTitle??'Panel';?></title><link rel="stylesheet" href="/style.css"></head><body><div class="layout">
+<?php require __DIR__.'/sidebar.php'; ?>
+<main class="main-content"><div class="top-bar"><h1><?php echo $pageTitle??'';?></h1>
+<div class="user-info"><span><?php echo e($_SESSION['username']);?></span> <a href="/logout.php" class="btn btn-sm btn-danger">Logout</a></div></div>
+<div class="content">
+<?php $fl=getFlash();if($fl):?><div class="alert alert-<?php echo $fl['type'];?>"><?php echo e($fl['msg']);?></div><?php endif;?>
+XEOF
+
+# ---- sidebar.php ----
+cat > /opt/litepanel/includes/sidebar.php << 'XEOF'
+<aside class="sidebar"><div class="sidebar-header"><h2>LitePanel</h2><small>v<?php echo PANEL_VERSION;?></small></div><nav><ul>
+<li><a href="/dashboard.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='dashboard.php'?'active':'';?>">&#127968; Dashboard</a></li>
+<li><a href="/domains.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='domains.php'?'active':'';?>">&#127760; Domains</a></li>
+<li><a href="/databases.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='databases.php'?'active':'';?>">&#128451; Databases</a></li>
+<li><a href="/filemanager.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='filemanager.php'?'active':'';?>">&#128193; File Manager</a></li>
+<li><a href="/ssl.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='ssl.php'?'active':'';?>">&#128274; SSL / Tunnel</a></li>
+<li><a href="/terminal.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='terminal.php'?'active':'';?>">&#128187; Terminal</a></li>
+<li><a href="/backups.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='backups.php'?'active':'';?>">&#128190; Backups</a></li>
+<li><a href="/settings.php" class="<?php echo basename($_SERVER['PHP_SELF'])=='settings.php'?'active':'';?>">&#9881; Settings</a></li>
+<li><a href="/phpmyadmin/" target="_blank">&#128202; phpMyAdmin</a></li>
+</ul></nav><div class="sidebar-footer">&#128100; <?php echo e($_SESSION['username']??'');?></div></aside>
+XEOF
+
+# ---- footer.php ----
+cat > /opt/litepanel/includes/footer.php << 'XEOF'
+</div></main></div></body></html>
+XEOF
+
+info "PHP includes created"
 
 ###############################################################################
-# STEP 7: Set permissions
+step "6/12 - Create Panel Pages"
 ###############################################################################
-log_step "7/15 - Setting permissions..."
-chown -R nobody:nogroup "${INSTALL_PATH}"
-chmod -R 750 "${INSTALL_PATH}"
-chmod 700 "${INSTALL_PATH}/sessions"
-chmod 700 "${INSTALL_PATH}/data"
-find "${INSTALL_PATH}" -type f -exec chmod 640 {} \;
-find "${INSTALL_PATH}/public" -type f -exec chmod 644 {} \;
-chmod 600 "${INSTALL_PATH}/includes/config.php"
+
+# ---- index.php (login) ----
+cat > /opt/litepanel/public/index.php << 'XEOF'
+<?php
+require_once __DIR__.'/../includes/config.php';
+require_once __DIR__.'/../includes/auth.php';
+startSession();
+if(isLoggedIn()){header('Location: /dashboard.php');exit;}
+$error='';
+if($_SERVER['REQUEST_METHOD']==='POST'){
+    $r=login(trim($_POST['username']??''),$_POST['password']??'');
+    if($r['success']){header('Location: /dashboard.php');exit;}
+    $error=$r['message'];
+}
+?><!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>LitePanel Login</title><link rel="stylesheet" href="/style.css"></head>
+<body class="login-body"><div class="login-container"><div class="login-box">
+<h1>&#128736; LitePanel</h1><p class="login-sub">Server Management Panel</p>
+<?php if($error):?><div class="alert alert-danger"><?php echo htmlspecialchars($error);?></div><?php endif;?>
+<form method="POST"><div class="form-group"><label>Username</label><input type="text" name="username" required autofocus></div>
+<div class="form-group"><label>Password</label><input type="password" name="password" required></div>
+<button type="submit" class="btn btn-primary btn-block">Sign In</button></form></div></div></body></html>
+XEOF
+
+# ---- dashboard.php ----
+cat > /opt/litepanel/public/dashboard.php << 'XEOF'
+<?php $pageTitle='Dashboard'; require __DIR__.'/../includes/header.php';
+$sys=getSystemInfo(); $db=Database::getInstance();
+$dc=$db->fetch("SELECT COUNT(*) as c FROM domains")['c']??0;
+$svcs=['OpenLiteSpeed'=>svcStatus('lsws'),'MariaDB'=>svcStatus('mariadb'),'Cloudflared'=>svcStatus('cloudflared'),'Fail2Ban'=>svcStatus('fail2ban'),'UFW'=>svcStatus('ufw')];
+?>
+<div class="stats-grid">
+<div class="stat-card"><h3>CPU Load</h3><div class="stat-value"><?php echo $sys['load'][0];?></div><p><?php echo $sys['cpu'];?> cores</p></div>
+<div class="stat-card"><h3>Memory</h3><div class="stat-value"><?php echo $sys['mem_percent'];?>%</div><p><?php echo formatBytes($sys['mem_used']);?> / <?php echo formatBytes($sys['mem_total']);?></p></div>
+<div class="stat-card"><h3>Disk</h3><div class="stat-value"><?php echo $sys['disk_percent'];?>%</div><p><?php echo formatBytes($sys['disk_used']);?> / <?php echo formatBytes($sys['disk_total']);?></p></div>
+<div class="stat-card"><h3>Domains</h3><div class="stat-value"><?php echo $dc;?></div><p>Active</p></div>
+</div>
+<div class="card"><h3>&#128994; Services</h3><div class="svc-grid">
+<?php foreach($svcs as $n=>$a):?><div class="svc-item"><span><?php echo $n;?></span><span class="badge <?php echo $a?'badge-success':'badge-danger';?>"><?php echo $a?'Running':'Stopped';?></span></div><?php endforeach;?>
+</div></div>
+<div class="card"><h3>System Info</h3><table class="table">
+<tr><td>Hostname</td><td><?php echo e($sys['hostname']);?></td></tr>
+<tr><td>OS</td><td><?php echo e($sys['os']);?></td></tr>
+<tr><td>Uptime</td><td><?php echo e($sys['uptime']);?></td></tr>
+</table></div>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- domains.php ----
+cat > /opt/litepanel/public/domains.php << 'XEOF'
+<?php $pageTitle='Domains'; require __DIR__.'/../includes/header.php';
+$mgr=new DomainManager();
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $act=$_POST['action']??'';
+    if($act==='add'){$r=$mgr->add($_POST['domain']??'');flash($r['success']?'success':'danger',$r['msg']);}
+    elseif($act==='delete'){$r=$mgr->remove($_POST['id']??0);flash($r['success']?'success':'danger',$r['msg']);}
+    header('Location: /domains.php');exit;
+}
+$domains=$mgr->list();
+?>
+<div class="card"><h3>Add Domain</h3><form method="POST" class="form-inline">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="add">
+<div class="form-group"><input type="text" name="domain" placeholder="example.com" required></div>
+<button class="btn btn-success">Add</button></form></div>
+<table class="table"><thead><tr><th>Domain</th><th>Document Root</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+<?php if(empty($domains)):?><tr><td colspan="4" style="text-align:center;color:#888">No domains</td></tr>
+<?php else:foreach($domains as $d):?><tr>
+<td><strong><?php echo e($d['domain']);?></strong></td><td><code><?php echo e($d['document_root']);?></code></td>
+<td><span class="badge badge-success"><?php echo e($d['status']);?></span></td>
+<td><form method="POST" style="display:inline" onsubmit="return confirm('Delete?')">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="delete">
+<input type="hidden" name="id" value="<?php echo $d['id'];?>"><button class="btn btn-sm btn-danger">Delete</button></form></td>
+</tr><?php endforeach;endif;?></tbody></table>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- databases.php ----
+cat > /opt/litepanel/public/databases.php << 'XEOF'
+<?php $pageTitle='Databases'; require __DIR__.'/../includes/header.php';
+$mgr=new DatabaseManager();
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $act=$_POST['action']??'';
+    if($act==='create_db'){$r=$mgr->createDb($_POST['dbname']??'');flash($r['success']?'success':'danger',$r['msg']);}
+    elseif($act==='drop_db'){$r=$mgr->dropDb($_POST['dbname']??'');flash($r['success']?'success':'danger',$r['msg']);}
+    elseif($act==='create_user'){$r=$mgr->createUser($_POST['dbuser']??'',$_POST['dbpass']??bin2hex(random_bytes(8)),$_POST['dbgrant']??'');flash($r['success']?'success':'danger',$r['msg']);}
+    header('Location: /databases.php');exit;
+}
+$dbs=$mgr->listDbs();$users=$mgr->listUsers();
+?>
+<div class="card"><h3>Create Database</h3><form method="POST" class="form-inline">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="create_db">
+<div class="form-group"><input type="text" name="dbname" placeholder="database_name" required pattern="[a-zA-Z0-9_]+"></div>
+<button class="btn btn-success">Create</button></form></div>
+<div class="card"><h3>Create User</h3><form method="POST" class="form-row">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="create_user">
+<div class="form-group"><label>Username</label><input type="text" name="dbuser" required></div>
+<div class="form-group"><label>Password</label><input type="text" name="dbpass" placeholder="auto-generate"></div>
+<div class="form-group"><label>Grant to DB</label><select name="dbgrant"><option value="">None</option>
+<?php foreach($dbs as $d):?><option value="<?php echo e($d);?>"><?php echo e($d);?></option><?php endforeach;?></select></div>
+<button class="btn btn-success" style="align-self:flex-end">Create</button></form></div>
+<h3>Databases (<?php echo count($dbs);?>)</h3>
+<table class="table"><thead><tr><th>Name</th><th>Actions</th></tr></thead><tbody>
+<?php foreach($dbs as $d):?><tr><td><strong><?php echo e($d);?></strong></td><td>
+<?php if($d!=='litepanel_db'):?><form method="POST" style="display:inline" onsubmit="return confirm('Drop?')">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="drop_db">
+<input type="hidden" name="dbname" value="<?php echo e($d);?>"><button class="btn btn-sm btn-danger">Drop</button></form>
+<?php endif;?></td></tr><?php endforeach;?></tbody></table>
+<h3>Users</h3><table class="table"><thead><tr><th>User</th><th>Host</th></tr></thead><tbody>
+<?php foreach($users as $u):?><tr><td><?php echo e($u['User']);?></td><td><?php echo e($u['Host']);?></td></tr><?php endforeach;?></tbody></table>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- filemanager.php ----
+cat > /opt/litepanel/public/filemanager.php << 'XEOF'
+<?php $pageTitle='File Manager'; require __DIR__.'/../includes/header.php';
+$base='/var/www'; $dir=realpath($_GET['dir']??$base)?:$base;
+if(strpos($dir,$base)!==0)$dir=$base;
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $act=$_POST['action']??'';
+    if($act==='upload'&&isset($_FILES['file'])){$t=$dir.'/'.basename($_FILES['file']['name']);if(strpos(realpath(dirname($t))?:$dir,$base)===0)move_uploaded_file($_FILES['file']['tmp_name'],$t);flash('success','Uploaded');}
+    elseif($act==='mkdir'){$n=preg_replace('/[^a-zA-Z0-9._-]/','',$_POST['dirname']??'');if($n)mkdir($dir.'/'.$n,0755);flash('success','Created');}
+    elseif($act==='delete'){$t=realpath($dir.'/'.basename($_POST['fname']??''));if($t&&strpos($t,$base)===0&&$t!==$base){is_dir($t)?shell_exec("rm -rf ".escapeshellarg($t)):unlink($t);flash('success','Deleted');}}
+    elseif($act==='save'){$t=realpath($dir.'/'.basename($_POST['fname']??''));if($t&&strpos($t,$base)===0)file_put_contents($t,$_POST['content']??'');flash('success','Saved');}
+    header("Location: /filemanager.php?dir=".urlencode($dir));exit;
+}
+$edit=null;$ec='';
+if(isset($_GET['edit'])){$ef=realpath($dir.'/'.basename($_GET['edit']));if($ef&&strpos($ef,$base)===0&&is_file($ef)&&filesize($ef)<2097152){$edit=$ef;$ec=file_get_contents($ef);}}
+$items=[];if(is_dir($dir)){foreach(scandir($dir) as $f){if($f==='.')continue;$p=$dir.'/'.$f;$items[]=['name'=>$f,'dir'=>is_dir($p),'size'=>is_file($p)?filesize($p):0,'mod'=>filemtime($p),'perm'=>substr(sprintf('%o',fileperms($p)),-4)];}
+usort($items,function($a,$b){if($a['name']==='..')return -1;if($b['name']==='..')return 1;if($a['dir']!==$b['dir'])return $b['dir']-$a['dir'];return strcasecmp($a['name'],$b['name']);});}
+?>
+<div class="breadcrumb">&#128193; <strong><?php echo e($dir);?></strong></div>
+<?php if($edit):?>
+<div class="card"><h3>Editing: <?php echo e(basename($edit));?></h3><form method="POST">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="save">
+<input type="hidden" name="fname" value="<?php echo e(basename($edit));?>">
+<textarea name="content" class="code-editor" rows="25"><?php echo e($ec);?></textarea><br>
+<button class="btn btn-success">Save</button> <a href="/filemanager.php?dir=<?php echo urlencode($dir);?>" class="btn btn-secondary">Cancel</a></form></div>
+<?php else:?>
+<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">
+<form method="POST" enctype="multipart/form-data" style="display:flex;gap:10px;align-items:flex-end">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="upload">
+<div class="form-group"><label>Upload</label><input type="file" name="file" required></div><button class="btn btn-primary">Upload</button></form>
+<form method="POST" style="display:flex;gap:10px;align-items:flex-end">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="mkdir">
+<div class="form-group"><label>New Dir</label><input type="text" name="dirname" required></div><button class="btn btn-success">Create</button></form></div>
+<table class="table"><thead><tr><th>Name</th><th>Size</th><th>Perms</th><th>Modified</th><th>Actions</th></tr></thead><tbody>
+<?php foreach($items as $f):?><tr><td>
+<?php if($f['dir']):?><a href="/filemanager.php?dir=<?php echo urlencode($dir.'/'.$f['name']);?>"><strong>&#128193; <?php echo e($f['name']);?>/</strong></a>
+<?php else:?>&#128196; <?php echo e($f['name']);endif;?></td>
+<td><?php echo $f['dir']?'-':formatBytes($f['size']);?></td><td><code><?php echo $f['perm'];?></code></td>
+<td><?php echo date('Y-m-d H:i',$f['mod']);?></td><td>
+<?php if(!$f['dir']&&$f['name']!=='..'):?><a href="/filemanager.php?dir=<?php echo urlencode($dir);?>&edit=<?php echo urlencode($f['name']);?>" class="btn btn-sm btn-primary">Edit</a><?php endif;?>
+<?php if($f['name']!=='..'):?><form method="POST" style="display:inline" onsubmit="return confirm('Delete?')">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="delete">
+<input type="hidden" name="fname" value="<?php echo e($f['name']);?>"><button class="btn btn-sm btn-danger">Del</button></form><?php endif;?></td></tr><?php endforeach;?></tbody></table>
+<?php endif; require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- ssl.php ----
+cat > /opt/litepanel/public/ssl.php << 'XEOF'
+<?php $pageTitle='SSL & Tunnel'; require __DIR__.'/../includes/header.php';
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $act=$_POST['action']??'';
+    if($act==='restart_tunnel'){shell_exec('sudo systemctl restart cloudflared 2>&1');flash('success','Tunnel restarted');}
+    elseif($act==='restart_ols'){shell_exec('sudo /usr/local/lsws/bin/lswsctrl restart 2>&1');flash('success','OLS restarted');}
+    header('Location: /ssl.php');exit;
+}
+$ts=svcStatus('cloudflared');$tc=file_exists('/etc/cloudflared/config.yml')?file_get_contents('/etc/cloudflared/config.yml'):'Not found';
+?>
+<div class="stats-grid"><div class="stat-card"><h3>Tunnel Status</h3>
+<div class="stat-value"><span class="badge <?php echo $ts?'badge-success':'badge-danger';?>"><?php echo $ts?'Running':'Stopped';?></span></div>
+<p>SSL is automatic via Cloudflare</p></div></div>
+<div class="card"><h3>Controls</h3><div style="display:flex;gap:10px">
+<form method="POST"><input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="restart_tunnel"><button class="btn btn-primary">Restart Tunnel</button></form>
+<form method="POST"><input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="restart_ols"><button class="btn btn-success">Restart OLS</button></form></div></div>
+<div class="card"><h3>Tunnel Config</h3><pre class="code-block"><?php echo e($tc);?></pre></div>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- settings.php ----
+cat > /opt/litepanel/public/settings.php << 'XEOF'
+<?php $pageTitle='Settings'; require __DIR__.'/../includes/header.php';
+$db=Database::getInstance();
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $act=$_POST['action']??'';
+    if($act==='change_pass'){
+        $cur=$_POST['cur_pass']??'';$new=$_POST['new_pass']??'';$cfm=$_POST['cfm_pass']??'';
+        if(empty($cur)||empty($new))flash('danger','All fields required');
+        elseif($new!==$cfm)flash('danger','Passwords do not match');
+        elseif(strlen($new)<8)flash('danger','Min 8 characters');
+        else{$u=$db->fetch("SELECT * FROM users WHERE id=?",[$_SESSION['user_id']]);
+            if($u&&password_verify($cur,$u['password'])){$db->query("UPDATE users SET password=? WHERE id=?",[password_hash($new,PASSWORD_DEFAULT),$_SESSION['user_id']]);flash('success','Password changed');}
+            else flash('danger','Current password incorrect');}
+    }elseif($act==='restart_svc'){
+        $svc=$_POST['svc']??'';$ok=['lsws','mariadb','cloudflared','fail2ban'];
+        if(in_array($svc,$ok)){if($svc==='lsws')shell_exec('sudo /usr/local/lsws/bin/lswsctrl restart 2>&1');else shell_exec('sudo systemctl restart '.escapeshellarg($svc).' 2>&1');sleep(2);flash('success',ucfirst($svc).' restarted');}
+    }
+    header('Location: /settings.php');exit;
+}
+$user=$db->fetch("SELECT * FROM users WHERE id=?",[$_SESSION['user_id']]);
+$logs=$db->fetchAll("SELECT * FROM login_log ORDER BY created_at DESC LIMIT 20");
+$svcs=[['id'=>'lsws','name'=>'OpenLiteSpeed'],['id'=>'mariadb','name'=>'MariaDB'],['id'=>'cloudflared','name'=>'Cloudflared'],['id'=>'fail2ban','name'=>'Fail2Ban']];
+?>
+<div class="card"><h3>&#128272; Change Password</h3><form method="POST" style="max-width:400px">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="change_pass">
+<div class="form-group"><label>Current Password</label><input type="password" name="cur_pass" required></div>
+<div class="form-group"><label>New Password</label><input type="password" name="new_pass" required minlength="8"></div>
+<div class="form-group"><label>Confirm</label><input type="password" name="cfm_pass" required></div>
+<button class="btn btn-primary">Change</button></form></div>
+<div class="card"><h3>&#9881; Services</h3><div class="svc-grid">
+<?php foreach($svcs as $s):?><div class="svc-item"><span><span class="badge <?php echo svcStatus($s['id'])?'badge-success':'badge-danger';?>"><?php echo svcStatus($s['id'])?'ON':'OFF';?></span> <?php echo $s['name'];?></span>
+<form method="POST"><input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="restart_svc"><input type="hidden" name="svc" value="<?php echo $s['id'];?>">
+<button class="btn btn-sm btn-primary" onclick="return confirm('Restart?')">Restart</button></form></div><?php endforeach;?></div></div>
+<div class="card"><h3>&#128373; Login Log</h3><table class="table"><thead><tr><th>Time</th><th>IP</th><th>User</th><th>Status</th></tr></thead><tbody>
+<?php foreach($logs as $l):?><tr><td><?php echo e($l['created_at']);?></td><td><code><?php echo e($l['ip_address']);?></code></td>
+<td><?php echo e($l['username']??'-');?></td><td><span class="badge <?php echo $l['success']?'badge-success':'badge-danger';?>"><?php echo $l['success']?'OK':'FAIL';?></span></td></tr><?php endforeach;?></tbody></table></div>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- backups.php ----
+cat > /opt/litepanel/public/backups.php << 'XEOF'
+<?php $pageTitle='Backups'; require __DIR__.'/../includes/header.php';
+$bdir=BASE_PATH.'/backups';$mgr=new DatabaseManager();$dmgr=new DomainManager();
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $act=$_POST['action']??'';
+    if($act==='backup_db'){$dn=preg_replace('/[^a-zA-Z0-9_]/','',$_POST['dbname']??'');if($dn){$fn=$dn.'_'.date('Ymd_His').'.sql.gz';$fp=$bdir.'/'.$fn;shell_exec("mysqldump --defaults-file=/root/.my.cnf ".escapeshellarg($dn)." 2>/dev/null | gzip > ".escapeshellarg($fp));if(file_exists($fp)&&filesize($fp)>0){chmod($fp,0600);flash('success',"Backup: {$fn}");}else{@unlink($fp);flash('danger','Backup failed');}}}
+    elseif($act==='backup_files'){$dom=preg_replace('/[^a-zA-Z0-9.\-]/','',$_POST['domain']??'');$sp="/var/www/{$dom}";if($dom&&is_dir($sp)){$fn=$dom.'_files_'.date('Ymd_His').'.tar.gz';$fp=$bdir.'/'.$fn;shell_exec("tar -czf ".escapeshellarg($fp)." -C /var/www ".escapeshellarg($dom)." 2>/dev/null");if(file_exists($fp)&&filesize($fp)>0){chmod($fp,0600);flash('success',"Backup: {$fn}");}else{@unlink($fp);flash('danger','Failed');}}}
+    elseif($act==='delete'){$fn=basename($_POST['file']??'');$fp=$bdir.'/'.$fn;if($fn&&file_exists($fp)){unlink($fp);flash('success','Deleted');}}
+    elseif($act==='download'){$fn=basename($_POST['file']??'');$fp=$bdir.'/'.$fn;if($fn&&file_exists($fp)){header('Content-Type: application/octet-stream');header('Content-Disposition: attachment; filename="'.$fn.'"');header('Content-Length: '.filesize($fp));readfile($fp);exit;}}
+    if($act!=='download'){header('Location: /backups.php');exit;}
+}
+$backups=[];if(is_dir($bdir)){foreach(scandir($bdir) as $f){if($f==='.'||$f==='..')continue;$fp=$bdir.'/'.$f;if(is_file($fp))$backups[]=['name'=>$f,'size'=>formatBytes(filesize($fp)),'date'=>date('Y-m-d H:i',filemtime($fp))];} usort($backups,function($a,$b){return strcmp($b['date'],$a['date']);});}
+$dbs=$mgr->listDbs();$doms=$dmgr->list();
+?>
+<div class="stats-grid">
+<div class="stat-card"><h3>&#128451; DB Backup</h3><form method="POST">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="backup_db">
+<div class="form-group"><select name="dbname" required><option value="">Select DB</option>
+<?php foreach($dbs as $d):?><option><?php echo e($d);?></option><?php endforeach;?></select></div>
+<button class="btn btn-success btn-sm">Backup</button></form></div>
+<div class="stat-card"><h3>&#128193; File Backup</h3><form method="POST">
+<input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="backup_files">
+<div class="form-group"><select name="domain" required><option value="">Select Domain</option>
+<?php foreach($doms as $d):?><option value="<?php echo e($d['domain']);?>"><?php echo e($d['domain']);?></option><?php endforeach;?></select></div>
+<button class="btn btn-success btn-sm">Backup</button></form></div></div>
+<table class="table"><thead><tr><th>File</th><th>Size</th><th>Date</th><th>Actions</th></tr></thead><tbody>
+<?php if(empty($backups)):?><tr><td colspan="4" style="text-align:center;color:#888">No backups</td></tr>
+<?php else:foreach($backups as $b):?><tr><td><code><?php echo e($b['name']);?></code></td><td><?php echo $b['size'];?></td><td><?php echo $b['date'];?></td><td>
+<form method="POST" style="display:inline"><input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="download"><input type="hidden" name="file" value="<?php echo e($b['name']);?>"><button class="btn btn-sm btn-primary">Download</button></form>
+<form method="POST" style="display:inline" onsubmit="return confirm('Delete?')"><input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>"><input type="hidden" name="action" value="delete"><input type="hidden" name="file" value="<?php echo e($b['name']);?>"><button class="btn btn-sm btn-danger">Delete</button></form>
+</td></tr><?php endforeach;endif;?></tbody></table>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- terminal.php ----
+cat > /opt/litepanel/public/terminal.php << 'XEOF'
+<?php $pageTitle='Terminal'; require __DIR__.'/../includes/header.php';
+$output='';$allowed=['ls','cat','head','tail','wc','df','du','free','uptime','whoami','hostname','uname','date','pwd','ps','top','netstat','ss','ip','systemctl','journalctl','grep','find','which','file','stat','dig','nslookup','ping','curl','tar','chmod','chown','mkdir','touch'];
+$blocked=['rm -rf /','mkfs','dd if=',':(){','> /dev/sd','shutdown','reboot','halt','poweroff','passwd','useradd','userdel','/etc/shadow'];
+if($_SERVER['REQUEST_METHOD']==='POST'&&validateCsrf($_POST['csrf_token']??'')){
+    $cmd=trim($_POST['cmd']??'');
+    if(!empty($cmd)){$blk=false;foreach($blocked as $p)if(stripos($cmd,$p)!==false){$blk=true;break;}
+        if($blk){$output="BLOCKED: dangerous command";}
+        else{$base=basename(explode(' ',$cmd)[0]);$safe=in_array($base,$allowed);
+            if($safe){$output=shell_exec($cmd." 2>&1")??'(no output)';}
+            else{$output="Command '{$base}' not allowed.\n\nAllowed: ".implode(', ',$allowed);}}}
+}
+?>
+<div class="alert alert-info">Safe mode: only whitelisted commands allowed.</div>
+<div style="background:#111;border-radius:8px;padding:20px">
+<pre style="color:#0f0;min-height:200px;max-height:500px;overflow:auto;margin-bottom:15px;font-size:13px"><?php echo $output?e($output):'LitePanel Terminal v2.0 - Type a command';?></pre>
+<form method="POST" style="display:flex;gap:10px"><input type="hidden" name="csrf_token" value="<?php echo e($csrfToken);?>">
+<span style="color:#0f0;padding:8px">$</span><input type="text" name="cmd" style="flex:1;background:#222;border:1px solid #333;color:#0f0;padding:10px;font-family:monospace" autofocus autocomplete="off" placeholder="Enter command...">
+<button class="btn btn-success">Run</button></form>
+<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:5px">
+<?php foreach(['uptime','free -h','df -h','ps aux --sort=-rss | head -15','systemctl status lsws','systemctl status mariadb','systemctl status cloudflared','ss -tlnp','uname -a'] as $q):?>
+<button onclick="document.querySelector('[name=cmd]').value='<?php echo $q;?>';document.querySelector('[name=cmd]').form.submit()" style="background:#222;color:#888;border:1px solid #333;padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px"><?php echo $q;?></button>
+<?php endforeach;?></div></div>
+<?php require __DIR__.'/../includes/footer.php';?>
+XEOF
+
+# ---- api.php ----
+cat > /opt/litepanel/public/api.php << 'XEOF'
+<?php
+require_once __DIR__.'/../includes/config.php';
+require_once __DIR__.'/../includes/auth.php';
+startSession(); header('Content-Type: application/json');
+if(!isLoggedIn()){http_response_code(401);echo json_encode(['error'=>'Unauthorized']);exit;}
+require_once __DIR__.'/../includes/functions.php';
+require_once __DIR__.'/../includes/database.php';
+$act=$_GET['action']??'';
+if($act==='stats'){$s=getSystemInfo();echo json_encode(['cpu'=>$s['load'][0],'mem'=>$s['mem_percent']??0,'disk'=>$s['disk_percent'],'services'=>['lsws'=>svcStatus('lsws'),'mariadb'=>svcStatus('mariadb'),'cloudflared'=>svcStatus('cloudflared')]]);}
+else echo json_encode(['error'=>'Unknown']);
+XEOF
+
+# ---- logout.php ----
+cat > /opt/litepanel/public/logout.php << 'XEOF'
+<?php require_once __DIR__.'/../includes/auth.php'; logout();
+XEOF
+
+info "All pages created"
 
 ###############################################################################
-# STEP 8: Install phpMyAdmin
+step "7/12 - Create CSS"
 ###############################################################################
-log_step "8/15 - Installing phpMyAdmin..."
-PMA_VERSION="5.2.1"
-PMA_DIR="${INSTALL_PATH}/public/phpmyadmin"
+cat > /opt/litepanel/public/style.css << 'XEOF'
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#333}
+.login-body{display:flex;justify-content:center;align-items:center;min-height:100vh;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%)}
+.login-container{width:100%;max-width:400px;padding:20px}
+.login-box{background:#fff;padding:40px;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);text-align:center}
+.login-box h1{font-size:2em;margin-bottom:5px;color:#333}
+.login-sub{color:#888;margin-bottom:25px}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:250px;background:#1e293b;color:#fff;flex-shrink:0;display:flex;flex-direction:column}
+.sidebar-header{padding:20px;border-bottom:1px solid #334155}
+.sidebar-header h2{font-size:1.4em;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sidebar-header small{color:#64748b;font-size:.75em}
+.sidebar nav{flex:1}
+.sidebar nav ul{list-style:none;padding:10px 0}
+.sidebar nav a{display:block;padding:12px 20px;color:#94a3b8;text-decoration:none;transition:.2s;border-left:3px solid transparent}
+.sidebar nav a:hover,.sidebar nav a.active{background:#334155;color:#fff;border-left-color:#667eea}
+.sidebar-footer{padding:15px 20px;border-top:1px solid #334155;color:#64748b;font-size:.85em}
+.main-content{flex:1;display:flex;flex-direction:column}
+.top-bar{display:flex;justify-content:space-between;align-items:center;padding:15px 25px;background:#fff;border-bottom:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.top-bar h1{font-size:1.3em;color:#1e293b}
+.user-info{display:flex;align-items:center;gap:10px;font-size:.9em;color:#64748b}
+.content{padding:25px;flex:1}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin-bottom:25px}
+.stat-card{background:#fff;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.06);border:1px solid #e2e8f0}
+.stat-card h3{font-size:.8em;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+.stat-value{font-size:2em;font-weight:700;color:#1e293b}
+.stat-card p{font-size:.8em;color:#94a3b8;margin-top:4px}
+.card{background:#fff;padding:20px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.06);border:1px solid #e2e8f0;margin-bottom:20px}
+.card h3{margin-bottom:15px;font-size:1.05em;color:#1e293b}
+.table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.06);border:1px solid #e2e8f0;margin-bottom:20px}
+.table th,.table td{padding:12px 15px;text-align:left;border-bottom:1px solid #f1f5f9}
+.table th{background:#f8fafc;font-weight:600;color:#64748b;font-size:.8em;text-transform:uppercase;letter-spacing:.5px}
+.table tr:hover{background:#fafbfc}
+.form-group{margin-bottom:15px}
+.form-group label{display:block;margin-bottom:5px;font-weight:500;font-size:.85em;color:#475569}
+.form-group input,.form-group select,.form-group textarea{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:.9em;transition:border .2s}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{outline:none;border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.15)}
+.form-inline{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.form-inline .form-group{margin-bottom:0;flex:1;min-width:200px}
+.form-row{display:flex;gap:15px;flex-wrap:wrap;align-items:flex-end}
+.form-row .form-group{flex:1;min-width:180px}
+.btn{display:inline-block;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-size:.9em;font-weight:500;text-decoration:none;transition:.2s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 4px 8px rgba(0,0,0,.1)}
+.btn-primary{background:#667eea;color:#fff}.btn-primary:hover{background:#5a67d8}
+.btn-success{background:#10b981;color:#fff}.btn-success:hover{background:#059669}
+.btn-danger{background:#ef4444;color:#fff}.btn-danger:hover{background:#dc2626}
+.btn-secondary{background:#6b7280;color:#fff}
+.btn-block{width:100%}
+.btn-sm{padding:5px 12px;font-size:.8em}
+.badge{padding:4px 10px;border-radius:20px;font-size:.75em;font-weight:600}
+.badge-success{background:#d1fae5;color:#065f46}
+.badge-danger{background:#fee2e2;color:#991b1b}
+.badge-warning{background:#fef3c7;color:#92400e}
+.alert{padding:12px 16px;border-radius:8px;margin-bottom:15px;font-size:.9em}
+.alert-success{background:#d1fae5;color:#065f46;border:1px solid #a7f3d0}
+.alert-danger{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+.alert-info{background:#dbeafe;color:#1e40af;border:1px solid #93c5fd}
+.svc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.svc-item{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0}
+.breadcrumb{background:#fff;padding:12px 16px;border-radius:8px;margin-bottom:15px;box-shadow:0 1px 3px rgba(0,0,0,.05);border:1px solid #e2e8f0}
+.breadcrumb a{color:#667eea;text-decoration:none}
+.code-editor{font-family:'Courier New',monospace;font-size:13px;width:100%;padding:15px;border:1px solid #334155;border-radius:8px;background:#1e293b;color:#e2e8f0;tab-size:4;line-height:1.5}
+.code-block{background:#1e293b;color:#e2e8f0;padding:16px;border-radius:8px;overflow-x:auto;font-size:13px;font-family:monospace;white-space:pre-wrap}
+code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-size:.85em;color:#475569}
+h2,h3{color:#1e293b}
+@media(max-width:768px){.layout{flex-direction:column}.sidebar{width:100%;flex-shrink:initial}.stats-grid{grid-template-columns:1fr}.form-inline,.form-row{flex-direction:column}}
+XEOF
+info "CSS created"
+
+###############################################################################
+step "8/12 - Install phpMyAdmin"
+###############################################################################
+PMA_DIR="/opt/litepanel/public/phpmyadmin"
 
 if [[ ! -d "$PMA_DIR" ]]; then
     cd /tmp
-    wget -q "https://files.phpmyadmin.net/phpMyAdmin/${PMA_VERSION}/phpMyAdmin-${PMA_VERSION}-all-languages.zip" -O phpmyadmin.zip 2>/dev/null || \
-    wget -q "https://files.phpmyadmin.net/phpMyAdmin/5.2.0/phpMyAdmin-5.2.0-all-languages.zip" -O phpmyadmin.zip 2>/dev/null || true
-
-    if [[ -f phpmyadmin.zip ]]; then
-        unzip -qo phpmyadmin.zip
+    wget -q "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null || \
+    wget -q "https://files.phpmyadmin.net/phpMyAdmin/5.2.0/phpMyAdmin-5.2.0-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null || true
+    if [[ -f pma.tar.gz ]]; then
+        tar xzf pma.tar.gz
         PMA_EXTRACTED=$(ls -d phpMyAdmin-*-all-languages 2>/dev/null | head -1)
-        if [[ -n "$PMA_EXTRACTED" && -d "$PMA_EXTRACTED" ]]; then
-            mv "$PMA_EXTRACTED" "$PMA_DIR"
-            PMA_BLOWFISH=$(generate_alphanum_password)
-            cat > "${PMA_DIR}/config.inc.php" <<PMAEOF
-<?php
-\$cfg['blowfish_secret'] = '${PMA_BLOWFISH}';
-\$i = 0;
-\$i++;
-\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
-\$cfg['Servers'][\$i]['host'] = 'localhost';
-\$cfg['Servers'][\$i]['compress'] = false;
-\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
-\$cfg['UploadDir'] = '';
-\$cfg['SaveDir'] = '';
-\$cfg['TempDir'] = '/tmp';
-\$cfg['DefaultLang'] = 'en';
-\$cfg['ThemeDefault'] = 'pmahomme';
-PMAEOF
-
-        chown -R nobody:nogroup "$PMA_DIR"
-        chmod -R 750 "$PMA_DIR"
-        find "$PMA_DIR" -type f -exec chmod 640 {} \;
-        fi
-        rm -f phpmyadmin.zip
+        [[ -n "$PMA_EXTRACTED" ]] && mv "$PMA_EXTRACTED" "$PMA_DIR"
+        rm -f pma.tar.gz
     fi
 fi
 
+# === KEY FIX: phpMyAdmin config with 127.0.0.1 (TCP) ===
+if [[ -d "$PMA_DIR" ]]; then
+    cat > "${PMA_DIR}/config.inc.php" << PMAEOF
+<?php
+\$cfg['blowfish_secret'] = '${PMA_BLOWFISH}';
+\$i = 0; \$i++;
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+\$cfg['Servers'][\$i]['port'] = '3306';
+\$cfg['Servers'][\$i]['connect_type'] = 'tcp';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['TempDir'] = '/tmp/phpmyadmin';
+\$cfg['UploadDir'] = '';
+\$cfg['SaveDir'] = '';
+PMAEOF
+    mkdir -p /tmp/phpmyadmin
+    chmod 777 /tmp/phpmyadmin
+    chown -R nobody:nogroup "$PMA_DIR"
+    info "phpMyAdmin installed (host=127.0.0.1, TCP mode)"
+else
+    warn "phpMyAdmin download failed - install manually later"
+fi
+
 ###############################################################################
-# STEP 9: Configure OpenLiteSpeed
+step "9/12 - Configure OpenLiteSpeed"
 ###############################################################################
-log_step "9/15 - Configuring OpenLiteSpeed..."
 
-OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
-
-# Backup original config
-cp "${OLS_CONF}" "${OLS_CONF}.bak.$(date +%s)" 2>/dev/null || true
-
-cat > "${OLS_CONF}" <<OLSEOF
-serverName                LitePanel
-user                      nobody
-group                     nogroup
-priority                  0
-autoRestart               1
-chrootPath                /
-enableChroot              0
-inMemBufSize              60M
-swappingDir               /tmp/lshttpd/swap
-autoFix503                1
-gracefulRestartTimeout    300
-mime                      conf/mime.properties
-showVersionNumber         0
-adminEmails               root@localhost
-
-errorlog logs/error.log {
-  logLevel                ERROR
-  debugLevel              0
-  rollingSize             10M
-  enableStderrLog         1
-}
-
-accesslog logs/access.log {
-  rollingSize             10M
-  keepDays                30
-  compressArchive         0
-}
-
-indexFiles                index.php, index.html
-
-expires  {
-  enableExpires           1
-  expiresByType           image/*=A604800,text/css=A604800,application/javascript=A604800
-}
-
-tuning  {
-  maxConnections          2000
-  maxSSLConnections       1000
-  connTimeout             300
-  maxKeepAliveReq         1000
-  keepAliveTimeout        5
-  sndBufSize              0
-  rcvBufSize              0
-  maxReqURLLen            32768
-  maxReqHeaderSize        65536
-  maxReqBodySize          2047M
-  maxDynRespHeaderSize    32768
-  maxDynRespSize          2047M
-  maxCachedFileSize       4096
-  totalInMemCacheSize     20M
-  maxMMapFileSize         256K
-  totalMMapCacheSize      40M
-  useSendfile             1
-  fileETag                28
-  enableGzipCompress      1
-  enableBrCompress        1
-  enableDynGzipCompress   1
-  gzipCompressLevel       6
-  brStaticCompressLevel   6
-  compressibleTypes       default
-  gzipAutoUpdateStatic    1
-  gzipStaticCompressLevel 6
-  gzipMaxFileSize         10M
-  gzipMinFileSize         300
-}
-
-fileAccessControl  {
-  followSymbolLink         1
-  checkSymbolLink          0
-  requiredPermissionMask   000
-  restrictedPermissionMask 000
-}
-
-perClientConnLimit  {
-  staticReqPerSec          0
-  dynReqPerSec             0
-  outBandwidth             0
-  inBandwidth              0
-  softLimit                10000
-  hardLimit                10000
-  gracePeriod              15
-  banPeriod                300
-}
-
-CGIRLimit  {
-  maxCGIInstances          20
-  minUID                   11
-  minGID                   10
-  priority                 0
-  CPUSoftLimit             10
-  CPUHardLimit             50
-  memSoftLimit             1460M
-  memHardLimit             1470M
-  procSoftLimit            400
-  procHardLimit            450
-}
-
-accessDenyDir  {
-  dir                      /
-  dir                      /etc/*
-  dir                      /dev/*
-  dir                      /proc/*
-  dir                      /sys/*
-}
-
-scripthandler  {
-  add                      lsapi:lsphp81 php
-}
-
-extprocessor lsphp81 {
-  type                     lsapi
-  address                  uds://tmp/lshttpd/lsphp81.sock
-  maxConns                 10
-  env                      PHP_LSAPI_CHILDREN=10
-  env                      LSAPI_AVOID_FORK=200M
-  initTimeout              60
-  retryTimeout             0
-  persistConn              1
-  pcKeepAliveTimeout       60
-  respBuffer               0
-  autoStart                2
-  path                     /usr/local/lsws/lsphp81/bin/lsphp
-  backlog                  100
-  instances                1
-  priority                 0
-  memSoftLimit             2047M
-  memHardLimit             2047M
-  procSoftLimit            1400
-  procHardLimit            1500
-  runOnStartUp             2
-}
-
-module cache {
-  internal                 1
-  checkPrivateCache        1
-  checkPublicCache         1
-  maxCacheObjSize          10000000
-  maxStaleAge              200
-  qsCache                  1
-  reqCookieCache           1
-  respCookieCache          1
-  ignoreReqCacheCtrl       1
-  ignoreRespCacheCtrl      0
-  enableCache              0
-  expireInSeconds          3600
-  enablePrivateCache       0
-  privateExpireInSeconds   3600
-}
-
-virtualhost LitePanel {
-  vhRoot                   ${INSTALL_PATH}/
-  configFile               ${INSTALL_PATH}/vhconf.conf
-  allowSymbolLink          1
-  enableScript             1
-  restrained               0
-}
-
-virtualhost DefaultSite {
-  vhRoot                   /home/default/
-  configFile               /usr/local/lsws/conf/vhosts/default/vhconf.conf
-  allowSymbolLink          1
-  enableScript             1
-  restrained               1
-}
-
-listener PanelListener {
-  address                  *:${PANEL_PORT}
-  secure                   0
-  map                      LitePanel *
-}
-
-listener DefaultListener {
-  address                  *:${WEB_PORT}
-  secure                   0
-  map                      DefaultSite *
-}
-OLSEOF
-
-# Create LitePanel vhost config
-cat > "${INSTALL_PATH}/vhconf.conf" <<VHEOF
-docRoot                   \$VH_ROOT/public/
+# Panel vhost config with phpMyAdmin context
+cat > /opt/litepanel/vhconf.conf << 'XEOF'
+docRoot                   /opt/litepanel/public
 enableGzip                1
 enableBr                  1
 
@@ -2116,21 +838,17 @@ index  {
 }
 
 context /phpmyadmin/ {
-  location                \$VH_ROOT/public/phpmyadmin/
+  location                /opt/litepanel/public/phpmyadmin/
   allowBrowse             1
   indexFiles               index.php
-
   accessControl  {
     allow                  *
   }
-
-  rewrite  {
-    enable                0
-  }
-
-  addDefaultCharset       off
-
   phpIniOverride  {
+    php_value upload_max_filesize 128M
+    php_value post_max_size 128M
+    php_value memory_limit 256M
+    php_value max_execution_time 300
   }
 }
 
@@ -2156,527 +874,460 @@ extprocessor lsphp81 {
 }
 
 rewrite  {
-  enable                  0
+  enable                  1
+  autoLoadHtaccess        1
 }
 
-accesslog \$VH_ROOT/logs/access.log {
+phpIniOverride  {
+  php_value upload_max_filesize 64M
+  php_value post_max_size 64M
+  php_value memory_limit 256M
+  php_value session.save_path /opt/litepanel/sessions
+  php_flag display_errors Off
+  php_flag log_errors On
+  php_value error_log /opt/litepanel/logs/php_error.log
+}
+
+accesslog /opt/litepanel/logs/access.log {
   useServer               0
   rollingSize             100M
 }
-
-errorlog \$VH_ROOT/logs/error.log {
+errorlog /opt/litepanel/logs/error.log {
   useServer               0
   logLevel                ERROR
   rollingSize             10M
 }
-VHEOF
+XEOF
 
-# Create default site vhost
+# Default website vhost
 mkdir -p /usr/local/lsws/conf/vhosts/default
-cat > "/usr/local/lsws/conf/vhosts/default/vhconf.conf" <<DVHEOF
-docRoot                   /home/default/public_html/
+cat > /var/www/vhconf.conf << 'XEOF'
+docRoot                   /var/www/html
 enableGzip                1
-enableBr                  1
-
 index  {
   useServer               0
-  indexFiles               index.php, index.html
+  indexFiles               index.html, index.php
+}
+scripthandler  {
+  add                     lsapi:lsphp81 php
+}
+rewrite  {
+  enable                  1
+  autoLoadHtaccess        1
+}
+XEOF
+
+cat > /var/www/html/index.html << 'XEOF'
+<!DOCTYPE html><html><head><title>LitePanel</title>
+<style>body{font-family:sans-serif;text-align:center;padding:80px;background:#f0f2f5;color:#333}h1{font-size:2.5em;margin-bottom:10px}p{color:#666}</style></head>
+<body><h1>&#128736; LitePanel</h1><p>Your server is running. Configure domains in the panel.</p></body></html>
+XEOF
+
+# Main OLS config
+cp /usr/local/lsws/conf/httpd_config.conf /usr/local/lsws/conf/httpd_config.conf.bak."$(date +%s)" 2>/dev/null || true
+
+cat > /usr/local/lsws/conf/httpd_config.conf << 'XEOF'
+serverName                LitePanel
+user                      nobody
+group                     nogroup
+priority                  0
+autoRestart               1
+chrootPath                /
+enableChroot              0
+inMemBufSize              60M
+swappingDir               /tmp/lshttpd/swap
+autoFix503                1
+gracefulRestartTimeout    300
+mime                      conf/mime.properties
+showVersionNumber         0
+adminEmails               root@localhost
+
+errorlog logs/error.log {
+  logLevel                WARN
+  debugLevel              0
+  rollingSize             10M
+  enableStderrLog         1
+}
+accesslog logs/access.log {
+  rollingSize             10M
+  keepDays                30
+}
+indexFiles                index.html, index.php
+
+tuning {
+  maxConnections          2000
+  maxSSLConnections       1000
+  connTimeout             300
+  maxKeepAliveReq         1000
+  keepAliveTimeout        5
+  maxReqURLLen            8192
+  maxReqHeaderSize        16380
+  maxReqBodySize          50M
+  maxDynRespHeaderSize    8192
+  maxDynRespSize          2047M
+  maxCachedFileSize       4096
+  totalInMemCacheSize     20M
+  maxMMapFileSize         256K
+  totalMMapCacheSize      40M
+  useSendfile             1
+  fileETag                28
+  enableGzipCompress      1
+  enableDynGzipCompress   1
+  gzipCompressLevel       6
 }
 
-scripthandler  {
+accessDenyDir {
+  dir                     /
+  dir                     /etc/*
+  dir                     /dev/*
+  dir                     /proc/*
+  dir                     /sys/*
+}
+
+scripthandler {
   add                     lsapi:lsphp81 php
 }
 
 extprocessor lsphp81 {
   type                    lsapi
-  address                 uds://tmp/lshttpd/default_lsphp.sock
-  maxConns                10
-  env                     PHP_LSAPI_CHILDREN=10
+  address                 uds://tmp/lshttpd/lsphp81.sock
+  maxConns                20
+  env                     PHP_LSAPI_CHILDREN=20
+  env                     LSAPI_AVOID_FORK=200M
   initTimeout             60
   retryTimeout            0
-  persistConn             1
-  pcKeepAliveTimeout      60
+  pcKeepAliveTimeout      15
   respBuffer              0
   autoStart               2
   path                    /usr/local/lsws/lsphp81/bin/lsphp
   backlog                 100
   instances               1
-  runOnStartUp            2
+  priority                0
+  memSoftLimit            2047M
+  memHardLimit            2047M
+  procSoftLimit           1400
+  procHardLimit           1500
 }
 
-rewrite  {
-  enable                  1
-  autoLoadHtaccess        1
+listener HTTP {
+  address                 *:8080
+  secure                  0
+  map                     DefaultSite *
 }
-DVHEOF
 
-# Create default landing page
-cat > /home/default/public_html/index.html <<'HTMLEOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to LitePanel</title>
-    <style>
-        body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .container { text-align: center; max-width: 600px; padding: 40px; }
-        h1 { font-size: 3em; background: linear-gradient(135deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        p { color: #94a3b8; font-size: 1.1em; line-height: 1.8; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>&#128736; LitePanel</h1>
-        <p>Your home server is running successfully.<br>Powered by OpenLiteSpeed + Cloudflare Tunnel.</p>
-    </div>
-</body>
-</html>
-HTMLEOF
+listener PanelHTTP {
+  address                 *:2087
+  secure                  0
+  map                     LitePanelVHost *
+}
 
-chown -R nobody:nogroup /home/default
-chmod -R 755 /home/default
+virtualhost DefaultSite {
+  vhRoot                  /var/www
+  configFile              /var/www/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              1
+}
+
+virtualhost LitePanelVHost {
+  vhRoot                  /opt/litepanel
+  configFile              /opt/litepanel/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              0
+  setUIDMode              2
+}
+XEOF
+
+mkdir -p /tmp/lshttpd
+chown nobody:nogroup /tmp/lshttpd 2>/dev/null || true
+
+/usr/local/lsws/bin/lswsctrl stop 2>/dev/null || true
+sleep 2
+/usr/local/lsws/bin/lswsctrl start
+sleep 2
+info "OpenLiteSpeed configured"
 
 ###############################################################################
-# STEP 10: Install and configure Cloudflared
+step "10/12 - Cloudflare Tunnel"
 ###############################################################################
-log_step "10/15 - Installing Cloudflare Tunnel..."
-
 if ! command -v cloudflared &>/dev/null; then
-    ARCH=$(dpkg --print-architecture)
-    wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb" -O /tmp/cloudflared.deb 2>/dev/null || true
-    if [[ -f /tmp/cloudflared.deb ]]; then
-        dpkg -i /tmp/cloudflared.deb 2>/dev/null || apt-get install -f -y
-        rm -f /tmp/cloudflared.deb
-    fi
+    curl -sL https://pkg.cloudflare.com/cloudflare-main.gpg | gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-archive-keyring.gpg 2>/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" > /etc/apt/sources.list.d/cloudflared.list
+    apt-get update -qq && apt-get install -y cloudflared
 fi
+
+CF_ACCOUNT_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
+    -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+[[ -z "$CF_ACCOUNT_ID" ]] && fail "Cannot get Cloudflare Account ID. Check API token."
+info "Account ID: ${CF_ACCOUNT_ID}"
+
+CF_ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=${DOMAIN}" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
+    -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+[[ -z "$CF_ZONE_ID" ]] && fail "Cannot get Zone ID for ${DOMAIN}"
+info "Zone ID: ${CF_ZONE_ID}"
+
+TUNNEL_SECRET=$(openssl rand -base64 32)
+TUNNEL_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel" \
+    -H "Authorization: Bearer ${CF_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"${TUNNEL_NAME}\",\"tunnel_secret\":\"${TUNNEL_SECRET}\"}")
+TUNNEL_ID=$(echo "$TUNNEL_RESPONSE" | jq -r '.result.id // empty')
+
+if [[ -z "$TUNNEL_ID" ]]; then
+    TUNNEL_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false" \
+        -H "Authorization: Bearer ${CF_TOKEN}" \
+        -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+fi
+[[ -z "$TUNNEL_ID" ]] && fail "Failed to create/find tunnel"
+info "Tunnel ID: ${TUNNEL_ID}"
+
+# DNS records
+for SUB in "" "panel" "db"; do
+    [[ -z "$SUB" ]] && RN="${DOMAIN}" || RN="${SUB}.${DOMAIN}"
+    # Delete existing then create
+    EXISTING=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=CNAME&name=${RN}" \
+        -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" | jq -r '.result[0].id // empty')
+    [[ -n "$EXISTING" ]] && curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${EXISTING}" \
+        -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" &>/dev/null
+    curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+        -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" \
+        -d "{\"type\":\"CNAME\",\"name\":\"${RN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"proxied\":true}" &>/dev/null
+    info "DNS: ${RN}"
+done
 
 mkdir -p /etc/cloudflared
-mkdir -p /root/.cloudflared
-
-# Authenticate using API token
-log_step "Configuring Cloudflare Tunnel..."
-
-# Get Account ID using API
-log_info "Fetching Cloudflare account information..."
-CF_ACCOUNTS_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts" \
-    -H "Authorization: Bearer ${CF_API_TOKEN}" \
-    -H "Content-Type: application/json")
-
-CF_ACCOUNT_ID=$(echo "$CF_ACCOUNTS_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-if [[ -z "$CF_ACCOUNT_ID" ]]; then
-    log_warn "Could not fetch account ID automatically. Tunnel may need manual setup."
-    CF_ACCOUNT_ID="unknown"
-fi
-
-log_info "Account ID: ${CF_ACCOUNT_ID}"
-
-# Generate tunnel secret
-TUNNEL_SECRET=$(openssl rand -base64 32 | tr -d '=+/' | head -c 44)
-TUNNEL_SECRET_B64=$(echo -n "${TUNNEL_SECRET}" | base64 | tr -d '\n')
-
-# Check if tunnel already exists
-EXISTING_TUNNEL=$(curl -s -X GET "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel?name=${TUNNEL_NAME}&is_deleted=false" \
-    -H "Authorization: Bearer ${CF_API_TOKEN}" \
-    -H "Content-Type: application/json")
-
-TUNNEL_ID=$(echo "$EXISTING_TUNNEL" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-if [[ -z "$TUNNEL_ID" || "$TUNNEL_ID" == "null" ]]; then
-    log_info "Creating new tunnel: ${TUNNEL_NAME}..."
-    CREATE_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/cfd_tunnel" \
-        -H "Authorization: Bearer ${CF_API_TOKEN}" \
-        -H "Content-Type: application/json" \
-        --data "{\"name\":\"${TUNNEL_NAME}\",\"tunnel_secret\":\"${TUNNEL_SECRET_B64}\"}")
-
-    TUNNEL_ID=$(echo "$CREATE_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-    if [[ -z "$TUNNEL_ID" || "$TUNNEL_ID" == "null" ]]; then
-        log_warn "Failed to create tunnel via API. Will attempt manual setup."
-        log_warn "API Response: ${CREATE_RESPONSE}"
-        TUNNEL_ID="manual-setup-needed"
-    else
-        log_info "Tunnel created: ${TUNNEL_ID}"
-    fi
-else
-    log_info "Existing tunnel found: ${TUNNEL_ID}"
-fi
-
-# Get Zone ID for DNS records
-log_info "Fetching zone information for ${MAIN_DOMAIN}..."
-ZONE_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=${MAIN_DOMAIN}" \
-    -H "Authorization: Bearer ${CF_API_TOKEN}" \
-    -H "Content-Type: application/json")
-ZONE_ID=$(echo "$ZONE_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-if [[ -n "$ZONE_ID" && "$ZONE_ID" != "null" && "$TUNNEL_ID" != "manual-setup-needed" ]]; then
-    log_info "Zone ID: ${ZONE_ID}"
-
-    # Create DNS CNAME records for tunnel
-    for SUBDOMAIN in "panel" "db" "@"; do
-        if [[ "$SUBDOMAIN" == "@" ]]; then
-            DNS_NAME="${MAIN_DOMAIN}"
-        else
-            DNS_NAME="${SUBDOMAIN}.${MAIN_DOMAIN}"
-        fi
-
-        log_info "Creating DNS record for ${DNS_NAME}..."
-
-        # Check if record exists
-        EXISTING_DNS=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&name=${DNS_NAME}" \
-            -H "Authorization: Bearer ${CF_API_TOKEN}" \
-            -H "Content-Type: application/json")
-
-        EXISTING_DNS_ID=$(echo "$EXISTING_DNS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-        if [[ -n "$EXISTING_DNS_ID" && "$EXISTING_DNS_ID" != "null" ]]; then
-            # Update existing
-            curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${EXISTING_DNS_ID}" \
-                -H "Authorization: Bearer ${CF_API_TOKEN}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"CNAME\",\"name\":\"${DNS_NAME}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}" >/dev/null 2>&1
-        else
-            # Create new
-            curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
-                -H "Authorization: Bearer ${CF_API_TOKEN}" \
-                -H "Content-Type: application/json" \
-                --data "{\"type\":\"CNAME\",\"name\":\"${DNS_NAME}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}" >/dev/null 2>&1
-        fi
-    done
-fi
-
-# Write credentials file
-if [[ "$TUNNEL_ID" != "manual-setup-needed" ]]; then
-    cat > /etc/cloudflared/credentials.json <<CREDEOF
-{
-    "AccountTag": "${CF_ACCOUNT_ID}",
-    "TunnelSecret": "${TUNNEL_SECRET_B64}",
-    "TunnelID": "${TUNNEL_ID}"
-}
+cat > /etc/cloudflared/credentials.json << CREDEOF
+{"AccountTag":"${CF_ACCOUNT_ID}","TunnelID":"${TUNNEL_ID}","TunnelSecret":"${TUNNEL_SECRET}"}
 CREDEOF
-    chmod 600 /etc/cloudflared/credentials.json
+chmod 600 /etc/cloudflared/credentials.json
 
-    # Also write to root cloudflared dir
-    cp /etc/cloudflared/credentials.json "/root/.cloudflared/${TUNNEL_ID}.json"
-fi
-
-# Generate config.yml
-cat > /etc/cloudflared/config.yml <<CFEOF
+cat > /etc/cloudflared/config.yml << CFGEOF
 tunnel: ${TUNNEL_ID}
 credentials-file: /etc/cloudflared/credentials.json
-
 ingress:
-  - hostname: panel.${MAIN_DOMAIN}
-    service: http://localhost:${PANEL_PORT}
-  - hostname: db.${MAIN_DOMAIN}
-    service: http://localhost:${PANEL_PORT}
-    path: phpmyadmin
-  - hostname: ${MAIN_DOMAIN}
-    service: http://localhost:${WEB_PORT}
+  - hostname: panel.${DOMAIN}
+    service: http://localhost:2087
+  - hostname: db.${DOMAIN}
+    service: http://localhost:2087
+  - hostname: ${DOMAIN}
+    service: http://localhost:8080
+  - hostname: "*.${DOMAIN}"
+    service: http://localhost:8080
   - service: http_status:404
-CFEOF
-
+CFGEOF
 chmod 600 /etc/cloudflared/config.yml
 
-# Install cloudflared as service
-cloudflared service install 2>/dev/null || true
-
-# Create systemd service manually if needed
-if [[ ! -f /etc/systemd/system/cloudflared.service ]]; then
-    cat > /etc/systemd/system/cloudflared.service <<SVCEOF
+# Systemd service
+systemctl stop cloudflared 2>/dev/null || true
+cloudflared service uninstall 2>/dev/null || true
+cat > /etc/systemd/system/cloudflared.service << 'XEOF'
 [Unit]
 Description=Cloudflare Tunnel
 After=network-online.target
 Wants=network-online.target
-
 [Service]
-Type=notify
+Type=simple
 ExecStart=/usr/bin/cloudflared tunnel --config /etc/cloudflared/config.yml run
-Restart=on-failure
-RestartSec=5s
-KillMode=process
-TimeoutStartSec=0
-LimitNOFILE=65536
-
+Restart=always
+RestartSec=5
 [Install]
 WantedBy=multi-user.target
-SVCEOF
-fi
+XEOF
 
 systemctl daemon-reload
-systemctl enable cloudflared 2>/dev/null || true
+systemctl enable cloudflared
+systemctl restart cloudflared
+sleep 3
+svc_status=$(systemctl is-active cloudflared 2>/dev/null || echo "starting")
+info "Cloudflared: ${svc_status}"
 
 ###############################################################################
-# STEP 11: Configure Firewall
+step "11/12 - Security (Firewall, Fail2Ban, Sudoers, Monitoring)"
 ###############################################################################
-log_step "11/15 - Configuring firewall..."
 
-# Reset UFW
-ufw --force reset 2>/dev/null || true
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp comment 'SSH'
-ufw --force enable
+# UFW
+ufw --force reset &>/dev/null
+ufw default deny incoming &>/dev/null
+ufw default allow outgoing &>/dev/null
+ufw allow 22/tcp &>/dev/null
+ufw --force enable &>/dev/null
+info "Firewall: only port 22 open"
 
-###############################################################################
-# STEP 12: Install and configure Fail2Ban
-###############################################################################
-log_step "12/15 - Configuring Fail2Ban..."
-apt-get install -y fail2ban
-
-cat > /etc/fail2ban/jail.local <<'F2BEOF'
+# Fail2Ban
+cat > /etc/fail2ban/jail.local << 'XEOF'
 [DEFAULT]
 bantime = 3600
 findtime = 600
 maxretry = 5
 backend = systemd
 banaction = ufw
-
 [sshd]
 enabled = true
 port = ssh
-filter = sshd
-logpath = /var/log/auth.log
 maxretry = 3
 bantime = 7200
-F2BEOF
-
+XEOF
 systemctl enable fail2ban
 systemctl restart fail2ban
+info "Fail2Ban configured"
 
-###############################################################################
-# STEP 13: Security Hardening
-###############################################################################
-log_step "13/15 - Applying security hardening..."
+# Sudoers for nobody (OLS process)
+cat > /etc/sudoers.d/litepanel << 'XEOF'
+nobody ALL=(ALL) NOPASSWD: /usr/local/lsws/bin/lswsctrl *
+nobody ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cloudflared
+nobody ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lsws
+nobody ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mariadb
+nobody ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart fail2ban
+nobody ALL=(ALL) NOPASSWD: /usr/bin/systemctl status *
+nobody ALL=(ALL) NOPASSWD: /usr/bin/systemctl is-active *
+XEOF
+chmod 440 /etc/sudoers.d/litepanel
+info "Sudoers configured"
 
-# Disable root SSH login
-SSHD_CONF="/etc/ssh/sshd_config"
-if [[ -f "$SSHD_CONF" ]]; then
-    cp "$SSHD_CONF" "${SSHD_CONF}.bak.$(date +%s)"
-
-    # Disable root login
-    if grep -q "^PermitRootLogin" "$SSHD_CONF"; then
-        sed -i 's/^PermitRootLogin.*/PermitRootLogin no/' "$SSHD_CONF"
-    elif grep -q "^#PermitRootLogin" "$SSHD_CONF"; then
-        sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' "$SSHD_CONF"
-    else
-        echo "PermitRootLogin no" >> "$SSHD_CONF"
-    fi
-
-    # Restrict SSH
-    if ! grep -q "^MaxAuthTries" "$SSHD_CONF"; then
-        echo "MaxAuthTries 3" >> "$SSHD_CONF"
-    fi
-    if ! grep -q "^ClientAliveInterval" "$SSHD_CONF"; then
-        echo "ClientAliveInterval 300" >> "$SSHD_CONF"
-        echo "ClientAliveCountMax 2" >> "$SSHD_CONF"
-    fi
-
-    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
-fi
-
-# Secure shared memory
-if ! grep -q "tmpfs /run/shm" /etc/fstab; then
-    echo "tmpfs /run/shm tmpfs defaults,noexec,nosuid 0 0" >> /etc/fstab
-fi
-
-###############################################################################
-# STEP 14: Setup Cron Jobs
-###############################################################################
-log_step "14/15 - Setting up monitoring cron jobs..."
-
-cat > /usr/local/bin/litepanel-monitor.sh <<'MONEOF'
+# Monitor script
+cat > /usr/local/bin/litepanel-monitor.sh << 'XEOF'
 #!/bin/bash
-# LitePanel Service Monitor
-
-# Check and restart OpenLiteSpeed
-if ! systemctl is-active --quiet lsws; then
-    systemctl restart lsws
-    echo "$(date): OpenLiteSpeed restarted" >> /var/log/litepanel-monitor.log
-fi
-
-# Check and restart MariaDB
-if ! systemctl is-active --quiet mariadb; then
-    systemctl restart mariadb
-    echo "$(date): MariaDB restarted" >> /var/log/litepanel-monitor.log
-fi
-
-# Check and restart Cloudflared
-if ! systemctl is-active --quiet cloudflared; then
-    systemctl restart cloudflared
-    echo "$(date): Cloudflared restarted" >> /var/log/litepanel-monitor.log
-fi
-
-# Rotate monitor log if > 10M
-if [[ -f /var/log/litepanel-monitor.log ]]; then
-    LOG_SIZE=$(stat -f%z /var/log/litepanel-monitor.log 2>/dev/null || stat -c%s /var/log/litepanel-monitor.log 2>/dev/null || echo 0)
-    if [[ "$LOG_SIZE" -gt 10485760 ]]; then
-        mv /var/log/litepanel-monitor.log /var/log/litepanel-monitor.log.old
+LOG="/var/log/litepanel-monitor.log"
+for svc in lsws mariadb cloudflared; do
+    if ! systemctl is-active --quiet "$svc"; then
+        systemctl restart "$svc" 2>/dev/null
+        echo "$(date): Restarted ${svc}" >> "$LOG"
     fi
-fi
-MONEOF
-
+done
+DISK=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
+[[ "$DISK" -gt 90 ]] && echo "$(date): WARN disk ${DISK}%" >> "$LOG"
+XEOF
 chmod 750 /usr/local/bin/litepanel-monitor.sh
 
-# Install crontabs
-CRON_FILE="/etc/cron.d/litepanel"
-cat > "$CRON_FILE" <<'CRONEOF'
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-
-# Monitor services every 5 minutes
+# Cron
+cat > /etc/cron.d/litepanel << 'XEOF'
 */5 * * * * root /usr/local/bin/litepanel-monitor.sh >/dev/null 2>&1
-
-# Clean old login logs weekly
-0 3 * * 0 root mariadb -u root litepanel_db -e "DELETE FROM login_log WHERE attempted_at < DATE_SUB(NOW(), INTERVAL 30 DAY);" >/dev/null 2>&1
-
-# Clean PHP sessions daily
+0 3 * * 0 root mariadb --defaults-file=/root/.my.cnf litepanel_db -e "DELETE FROM login_log WHERE created_at < DATE_SUB(NOW(), INTERVAL 30 DAY);" >/dev/null 2>&1
 0 4 * * * root find /opt/litepanel/sessions -type f -mtime +1 -delete >/dev/null 2>&1
-CRONEOF
+XEOF
+chmod 644 /etc/cron.d/litepanel
 
-chmod 644 "$CRON_FILE"
+# Logrotate
+cat > /etc/logrotate.d/litepanel << 'XEOF'
+/opt/litepanel/logs/*.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    create 640 nobody nogroup
+}
+XEOF
+info "Monitoring & cron configured"
 
 ###############################################################################
-# STEP 15: Start Services
+step "12/12 - Permissions & Final Start"
 ###############################################################################
-log_step "15/15 - Starting all services..."
+chown -R nobody:nogroup /opt/litepanel
+chmod -R 750 /opt/litepanel
+chmod 700 /opt/litepanel/sessions /opt/litepanel/data /opt/litepanel/backups
+find /opt/litepanel/public -type f -exec chmod 644 {} \;
+chmod 600 /opt/litepanel/includes/config.php
 
-# Ensure directories exist
-mkdir -p /tmp/lshttpd
-chown -R nobody:nogroup /tmp/lshttpd 2>/dev/null || true
+if [[ -d "$PMA_DIR" ]]; then
+    chown -R nobody:nogroup "$PMA_DIR"
+    find "$PMA_DIR" -type d -exec chmod 750 {} \;
+    find "$PMA_DIR" -type f -exec chmod 640 {} \;
+fi
 
-# Restart OLS
-/usr/local/lsws/bin/lswsctrl stop 2>/dev/null || true
-sleep 2
-/usr/local/lsws/bin/lswsctrl start 2>/dev/null || true
+chown -R nobody:nogroup /var/www
+chmod -R 755 /var/www
 
-# Re-enable & start services
-systemctl enable lsws 2>/dev/null || true
-systemctl enable mariadb 2>/dev/null || true
+# Restart everything
 systemctl restart mariadb
-
-# Start cloudflared
+/usr/local/lsws/bin/lswsctrl restart 2>/dev/null || true
 systemctl restart cloudflared 2>/dev/null || true
-
-# Wait for services
 sleep 3
 
 ###############################################################################
 # SAVE CREDENTIALS
 ###############################################################################
-cat > "${CREDS_FILE}" <<CREDFILE
-###############################################
-# LitePanel Credentials
-# Generated: $(date)
-# KEEP THIS FILE SECURE - DELETE AFTER NOTING
-###############################################
+cat > /root/.litepanel_credentials << CREDEOF
+================================================
+  LitePanel v2.0 Credentials
+  Generated: $(date)
+================================================
 
 Panel Admin:
   Username: admin
-  Password: ${ADMIN_PASSWORD}
+  Password: ${ADMIN_PASS}
 
-OLS WebAdmin:
-  URL: https://localhost:7080
-  Username: admin
-  Password: ${OLS_ADMIN_PASSWORD}
+MariaDB Root:
+  Password: ${DB_ROOT_PASS}
 
-Database Root:
-  Password: ${DB_ROOT_PASSWORD}
+Panel Database:
+  DB Name:  litepanel_db
+  Username: litepanel_user
+  Password: ${DB_USER_PASS}
 
-Database:
-  Name: ${DB_NAME}
-  User: ${DB_USER}
-  Password: ${DB_PASSWORD}
+phpMyAdmin Login:
+  User: root
+  Pass: ${DB_ROOT_PASS}
 
-Cloudflare:
-  Tunnel ID: ${TUNNEL_ID}
-  Tunnel Name: ${TUNNEL_NAME}
+OLS WebAdmin (https://localhost:7080):
+  User: admin
+  Pass: ${OLS_ADMIN_PASS}
 
-URLs:
-  Panel: https://panel.${MAIN_DOMAIN}
-  Website: https://${MAIN_DOMAIN}
-  phpMyAdmin: https://db.${MAIN_DOMAIN}
-CREDFILE
+Remote Access:
+  Panel:      https://panel.${DOMAIN}
+  Website:    https://${DOMAIN}
+  phpMyAdmin: https://panel.${DOMAIN}/phpmyadmin/
 
-chmod 600 "${CREDS_FILE}"
+Tunnel: ${TUNNEL_NAME} (${TUNNEL_ID})
+================================================
+CREDEOF
+chmod 600 /root/.litepanel_credentials
 
 ###############################################################################
-# OUTPUT SUMMARY
+# SUMMARY
 ###############################################################################
-
-OLS_STATUS=$(systemctl is-active lsws 2>/dev/null || echo "unknown")
-MARIADB_STATUS=$(systemctl is-active mariadb 2>/dev/null || echo "unknown")
-CLOUDFLARED_STATUS=$(systemctl is-active cloudflared 2>/dev/null || echo "unknown")
-FAIL2BAN_STATUS=$(systemctl is-active fail2ban 2>/dev/null || echo "unknown")
-UFW_STATUS=$(ufw status 2>/dev/null | head -1 || echo "unknown")
+OLS_S=$(systemctl is-active lsws 2>/dev/null || echo "?")
+DB_S=$(systemctl is-active mariadb 2>/dev/null || echo "?")
+CF_S=$(systemctl is-active cloudflared 2>/dev/null || echo "?")
+F2B_S=$(systemctl is-active fail2ban 2>/dev/null || echo "?")
 
 echo ""
-echo -e "${CYAN}================================================================${NC}"
-echo -e "${CYAN}         LitePanel Installation Complete!                        ${NC}"
-echo -e "${CYAN}================================================================${NC}"
+echo -e "${GREEN}╔═══════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║     LitePanel v2.0 - INSTALLED!           ║${NC}"
+echo -e "${GREEN}╠═══════════════════════════════════════════╣${NC}"
+echo -e "${GREEN}║                                           ║${NC}"
+echo -e "${GREEN}║  Panel:  ${CYAN}https://panel.${DOMAIN}${GREEN}${NC}"
+echo -e "${GREEN}║  Web:    ${CYAN}https://${DOMAIN}${GREEN}${NC}"
+echo -e "${GREEN}║  PMA:    ${CYAN}https://panel.${DOMAIN}/phpmyadmin/${GREEN}${NC}"
+echo -e "${GREEN}║                                           ║${NC}"
+echo -e "${GREEN}║  Panel Login:                             ║${NC}"
+echo -e "${GREEN}║    User: ${YELLOW}admin${NC}"
+echo -e "${GREEN}║    Pass: ${YELLOW}${ADMIN_PASS}${NC}"
+echo -e "${GREEN}║                                           ║${NC}"
+echo -e "${GREEN}║  phpMyAdmin Login:                        ║${NC}"
+echo -e "${GREEN}║    User: ${YELLOW}root${NC}"
+echo -e "${GREEN}║    Pass: ${YELLOW}${DB_ROOT_PASS}${NC}"
+echo -e "${GREEN}║                                           ║${NC}"
+echo -e "${GREEN}║  Services:                                ║${NC}"
+echo -e "${GREEN}║    OpenLiteSpeed: ${OLS_S}${NC}"
+echo -e "${GREEN}║    MariaDB:       ${DB_S}${NC}"
+echo -e "${GREEN}║    Cloudflared:   ${CF_S}${NC}"
+echo -e "${GREEN}║    Fail2Ban:      ${F2B_S}${NC}"
+echo -e "${GREEN}║                                           ║${NC}"
+echo -e "${GREEN}║  Credentials: /root/.litepanel_credentials║${NC}"
+echo -e "${GREEN}╚═══════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${GREEN}ACCESS URLS:${NC}"
-echo -e "  LitePanel:    ${YELLOW}https://panel.${MAIN_DOMAIN}${NC}"
-echo -e "  Main Website: ${YELLOW}https://${MAIN_DOMAIN}${NC}"
-echo -e "  phpMyAdmin:   ${YELLOW}https://db.${MAIN_DOMAIN}${NC}"
+
+# Quick test
+echo "--- Quick Test ---"
+curl -s -o /dev/null -w "Panel (2087): HTTP %{http_code}\n" http://localhost:2087/ 2>/dev/null || true
+curl -s -o /dev/null -w "Web   (8080): HTTP %{http_code}\n" http://localhost:8080/ 2>/dev/null || true
+mariadb -u root -p"${DB_ROOT_PASS}" -e "SELECT 'MariaDB: OK'" 2>/dev/null || echo "MariaDB: connection test"
 echo ""
-echo -e "${GREEN}PANEL LOGIN:${NC}"
-echo -e "  Username: ${YELLOW}admin${NC}"
-echo -e "  Password: ${YELLOW}${ADMIN_PASSWORD}${NC}"
-echo ""
-echo -e "${GREEN}OLS WEBADMIN:${NC}"
-echo -e "  Username: ${YELLOW}admin${NC}"
-echo -e "  Password: ${YELLOW}${OLS_ADMIN_PASSWORD}${NC}"
-echo ""
-echo -e "${GREEN}DATABASE:${NC}"
-echo -e "  Root Password:     ${YELLOW}${DB_ROOT_PASSWORD}${NC}"
-echo -e "  Panel DB Name:     ${YELLOW}${DB_NAME}${NC}"
-echo -e "  Panel DB User:     ${YELLOW}${DB_USER}${NC}"
-echo -e "  Panel DB Password: ${YELLOW}${DB_PASSWORD}${NC}"
-echo ""
-echo -e "${GREEN}CLOUDFLARE TUNNEL:${NC}"
-echo -e "  Tunnel Name: ${YELLOW}${TUNNEL_NAME}${NC}"
-echo -e "  Tunnel ID:   ${YELLOW}${TUNNEL_ID}${NC}"
-echo ""
-echo -e "${GREEN}SERVICE STATUS:${NC}"
-echo -e "  OpenLiteSpeed:     ${OLS_STATUS}"
-echo -e "  MariaDB:           ${MARIADB_STATUS}"
-echo -e "  Cloudflare Tunnel: ${CLOUDFLARED_STATUS}"
-echo -e "  Fail2Ban:          ${FAIL2BAN_STATUS}"
-echo -e "  UFW Firewall:      ${UFW_STATUS}"
-echo ""
-echo -e "${GREEN}FIREWALL:${NC}"
-echo -e "  Only port 22 (SSH) is open"
-echo -e "  All web access is via Cloudflare Tunnel"
-echo ""
-echo -e "${GREEN}SECURITY:${NC}"
-echo -e "  Root SSH login disabled"
-echo -e "  Fail2Ban protecting SSH"
-echo -e "  Service auto-restart monitoring enabled"
-echo ""
-echo -e "${CYAN}================================================================${NC}"
-echo -e "${YELLOW}  ZERO TRUST SETUP (RECOMMENDED):${NC}"
-echo -e "${CYAN}================================================================${NC}"
-echo ""
-echo -e "  1. Go to: ${YELLOW}https://one.dash.cloudflare.com${NC}"
-echo -e "  2. Select your account"
-echo -e "  3. Navigate to ${YELLOW}Access > Applications${NC}"
-echo -e "  4. Click ${YELLOW}Add an application${NC} > ${YELLOW}Self-hosted${NC}"
-echo -e "  5. Application name: ${YELLOW}LitePanel${NC}"
-echo -e "  6. Application domain: ${YELLOW}panel.${MAIN_DOMAIN}${NC}"
-echo -e "  7. Add policy:"
-echo -e "     - Name: ${YELLOW}Admin Only${NC}"
-echo -e "     - Action: ${YELLOW}Allow${NC}"
-echo -e "     - Include: ${YELLOW}Emails${NC} = ${YELLOW}${CF_EMAIL}${NC}"
-echo -e "  8. Repeat for ${YELLOW}db.${MAIN_DOMAIN}${NC} (phpMyAdmin)"
-echo -e ""
-echo -e "  This adds email-based authentication BEFORE"
-echo -e "  users can even reach your login page."
-echo ""
-echo -e "${CYAN}================================================================${NC}"
-echo -e "${RED}  IMPORTANT: Credentials saved to ${CREDS_FILE}${NC}"
-echo -e "${RED}  Please note them down and delete the file!${NC}"
-echo -e "${CYAN}================================================================${NC}"
-echo ""
-```
+MAINEOF
+
+chmod +x /root/install.sh
+echo "Script saved. Run with: bash /root/install.sh"

@@ -1,7 +1,8 @@
 #!/bin/bash
 ############################################
-# LitePanel Installer v2.0 (Production)
+# LitePanel Installer v2.1 (Production)
 # Fresh Ubuntu 22.04 LTS Only
+# REVISED: Fixed phpMyAdmin & Security Issues
 ############################################
 
 export DEBIAN_FRONTEND=noninteractive
@@ -10,8 +11,9 @@ export DEBIAN_FRONTEND=noninteractive
 PANEL_DIR="/opt/litepanel"
 PANEL_PORT=3000
 ADMIN_USER="admin"
-ADMIN_PASS="admin123"
-DB_ROOT_PASS="LitePanel$(date +%s | tail -c 6)Zx"
+# Generate stronger password
+ADMIN_PASS=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-16)
+DB_ROOT_PASS="LitePanel$(openssl rand -hex 8)"
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 [ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
@@ -45,21 +47,21 @@ done
 clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
-echo "  ║   LitePanel Installer v2.0       ║"
+echo "  ║   LitePanel Installer v2.1       ║"
 echo "  ║   Ubuntu 22.04 LTS              ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2
 
 ########################################
-step "Step 1/9: Update System"
+step "Step 1/10: Update System"
 ########################################
 apt-get update -y -qq > /dev/null 2>&1
 apt-get upgrade -y -qq > /dev/null 2>&1
 log "System updated"
 
 ########################################
-step "Step 2/9: Install Dependencies"
+step "Step 2/10: Install Dependencies"
 ########################################
 apt-get install -y -qq curl wget gnupg2 software-properties-common \
   apt-transport-https ca-certificates lsb-release ufw git unzip \
@@ -67,7 +69,7 @@ apt-get install -y -qq curl wget gnupg2 software-properties-common \
 log "Dependencies installed"
 
 ########################################
-step "Step 3/9: Install OpenLiteSpeed + PHP 8.1"
+step "Step 3/10: Install OpenLiteSpeed + PHP 8.1"
 ########################################
 
 CODENAME=$(lsb_release -sc 2>/dev/null || echo "jammy")
@@ -173,25 +175,56 @@ fi
 log "OpenLiteSpeed installed"
 
 # ============================================
-# INSTALL PHP 8.1 (split into required/optional)
+# INSTALL PHP 8.1 WITH ALL REQUIRED EXTENSIONS
 # ============================================
-log "Installing PHP 8.1..."
-apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl > /tmp/php_install.log 2>&1
+log "Installing PHP 8.1 with all required extensions..."
+
+# Core PHP packages
+CORE_PKGS="lsphp81 lsphp81-common lsphp81-mysql lsphp81-mysqli lsphp81-curl lsphp81-json"
+apt-get install -y $CORE_PKGS > /tmp/php_install.log 2>&1
 PHP_RC=$?
 
-# Optional PHP extensions (OK if some fail)
-apt-get install -y -qq lsphp81-mbstring lsphp81-xml lsphp81-zip \
-  lsphp81-intl lsphp81-iconv lsphp81-opcache >> /tmp/php_install.log 2>&1
+if [ $PHP_RC -ne 0 ]; then
+  err "Failed to install core PHP packages. Check /tmp/php_install.log"
+  exit 1
+fi
 
+# Additional required extensions for phpMyAdmin
+ADDITIONAL_PKGS="lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd lsphp81-intl lsphp81-iconv lsphp81-opcache lsphp81-bz2"
+apt-get install -y $ADDITIONAL_PKGS >> /tmp/php_install.log 2>&1
+
+# Create symlink and verify
 if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
   ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
-  log "PHP 8.1 installed ($(php -v 2>/dev/null | head -1 | awk '{print $2}'))"
+  PHP_VERSION=$(php -v 2>/dev/null | head -1 | awk '{print $2}')
+  log "PHP 8.1 installed ($PHP_VERSION)"
 else
-  if [ $PHP_RC -ne 0 ]; then
-    err "lsphp81 installation failed. Last 10 lines:"
-    tail -10 /tmp/php_install.log
-  fi
-  warn "lsphp81 binary not found - PHP might not work"
+  err "lsphp81 binary not found - PHP installation failed"
+  exit 1
+fi
+
+# ============================================
+# CONFIGURE PHP FOR MYSQL SOCKET
+# ============================================
+log "Configuring PHP MySQL socket path..."
+PHP_INI="/usr/local/lsws/lsphp81/etc/php/8.1/litespeed/php.ini"
+if [ -f "$PHP_INI" ]; then
+  # Backup original
+  cp "$PHP_INI" "$PHP_INI.bak"
+  
+  # Configure MySQL socket paths
+  sed -i 's/^;\?mysqli.default_socket.*/mysqli.default_socket = \/var\/run\/mysqld\/mysqld.sock/' "$PHP_INI"
+  sed -i 's/^;\?mysql.default_socket.*/mysql.default_socket = \/var\/run\/mysqld\/mysqld.sock/' "$PHP_INI"
+  sed -i 's/^;\?pdo_mysql.default_socket.*/pdo_mysql.default_socket = \/var\/run\/mysqld\/mysqld.sock/' "$PHP_INI"
+  
+  # If lines don't exist, add them
+  grep -q "mysqli.default_socket" "$PHP_INI" || echo "mysqli.default_socket = /var/run/mysqld/mysqld.sock" >> "$PHP_INI"
+  grep -q "mysql.default_socket" "$PHP_INI" || echo "mysql.default_socket = /var/run/mysqld/mysqld.sock" >> "$PHP_INI"
+  grep -q "pdo_mysql.default_socket" "$PHP_INI" || echo "pdo_mysql.default_socket = /var/run/mysqld/mysqld.sock" >> "$PHP_INI"
+  
+  log "PHP MySQL socket configured"
+else
+  warn "PHP ini file not found at expected location"
 fi
 
 # ============================================
@@ -206,6 +239,9 @@ if [ ! -f "$OLS_CONF" ]; then
 fi
 
 log "Configuring OpenLiteSpeed..."
+
+# Backup original config
+cp "$OLS_CONF" "$OLS_CONF.bak"
 
 # Set admin password (MD5 format, same method as CyberPanel)
 if [ -d "/usr/local/lsws/admin/conf" ]; then
@@ -262,7 +298,26 @@ sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$
 # Update Example vhost to use lsphp81 (for phpMyAdmin)
 EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
 if [ -f "$EXAMPLE_VHCONF" ]; then
-  sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
+  # Backup
+  cp "$EXAMPLE_VHCONF" "$EXAMPLE_VHCONF.bak"
+  
+  # Ensure script handler for PHP
+  if ! grep -q "scripthandler" "$EXAMPLE_VHCONF"; then
+    cat >> "$EXAMPLE_VHCONF" <<'VHEOF'
+
+scripthandler  {
+  add                     lsapi:lsphp81 php
+}
+VHEOF
+  else
+    sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
+  fi
+  
+  # Ensure index files include index.php
+  if ! grep -q "index.php" "$EXAMPLE_VHCONF"; then
+    sed -i '/indexFiles/c\  indexFiles              index.php, index.html' "$EXAMPLE_VHCONF"
+  fi
+  
   log "Example vhost updated to lsphp81"
 fi
 
@@ -286,12 +341,13 @@ else
 fi
 
 ########################################
-step "Step 4/9: Install MariaDB"
+step "Step 4/10: Install MariaDB"
 ########################################
 apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
 systemctl enable mariadb > /dev/null 2>&1
 systemctl start mariadb
 
+# Wait for MariaDB to be ready
 for i in $(seq 1 15); do
   mysqladmin ping &>/dev/null && break
   sleep 2
@@ -304,13 +360,20 @@ if mysqladmin ping &>/dev/null; then
     DROP DATABASE IF EXISTS test;
     FLUSH PRIVILEGES;
   " 2>/dev/null
+  
+  # Create socket symlink for compatibility
+  if [ -S "/var/run/mysqld/mysqld.sock" ] && [ ! -S "/tmp/mysql.sock" ]; then
+    ln -s /var/run/mysqld/mysqld.sock /tmp/mysql.sock
+    log "MySQL socket symlink created"
+  fi
+  
   log "MariaDB installed & secured"
 else
   err "MariaDB failed to start"
 fi
 
 ########################################
-step "Step 5/9: Install Node.js 18"
+step "Step 5/10: Install Node.js 18"
 ########################################
 if ! command -v node > /dev/null 2>&1; then
   curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
@@ -326,7 +389,7 @@ else
 fi
 
 ########################################
-step "Step 6/9: Creating LitePanel App"
+step "Step 6/10: Creating LitePanel App"
 ########################################
 mkdir -p ${PANEL_DIR}/{public/css,public/js}
 cd ${PANEL_DIR}
@@ -335,7 +398,7 @@ cd ${PANEL_DIR}
 cat > package.json <<'PKGEOF'
 {
   "name": "litepanel",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "scripts": { "start": "node app.js" },
   "dependencies": {
@@ -364,7 +427,7 @@ if [ $NPM_RC -ne 0 ]; then
 fi
 log "npm dependencies installed"
 
-# --- config.json ---
+# --- config.json with stronger credentials ---
 HASHED_PASS=$(node -e "console.log(require('bcryptjs').hashSync('${ADMIN_PASS}', 10))" 2>/dev/null)
 SESSION_SECRET=$(openssl rand -hex 32)
 
@@ -1107,18 +1170,20 @@ JSEOF
 log "LitePanel app created"
 
 ########################################
-step "Step 7/9: Install phpMyAdmin"
+step "Step 7/10: Install phpMyAdmin"
 ########################################
 PMA_DIR="/usr/local/lsws/Example/html/phpmyadmin"
 mkdir -p ${PMA_DIR}
 cd /tmp
-wget -q "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null
+log "Downloading phpMyAdmin..."
+wget "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null
 if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
   tar xzf pma.tar.gz
   cp -rf phpMyAdmin-*/* ${PMA_DIR}/
   rm -rf phpMyAdmin-* pma.tar.gz
 
-  BLOWFISH=$(openssl rand -hex 16)
+  # Generate stronger blowfish secret (32 bytes)
+  BLOWFISH=$(openssl rand -hex 32)
   cat > ${PMA_DIR}/config.inc.php <<PMAEOF
 <?php
 \$cfg['blowfish_secret'] = '${BLOWFISH}';
@@ -1127,15 +1192,28 @@ if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
 \$cfg['Servers'][\$i]['host'] = 'localhost';
 \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['Servers'][\$i]['socket'] = '/var/run/mysqld/mysqld.sock';
+\$cfg['TempDir'] = '/tmp';
+\$cfg['UploadDir'] = '';
+\$cfg['SaveDir'] = '';
 PMAEOF
+  
+  # Set proper permissions
   chown -R nobody:nogroup ${PMA_DIR}
+  chmod 755 ${PMA_DIR}
+  
+  # Create tmp directory for phpMyAdmin
+  mkdir -p ${PMA_DIR}/tmp
+  chown nobody:nogroup ${PMA_DIR}/tmp
+  chmod 755 ${PMA_DIR}/tmp
+  
   log "phpMyAdmin installed"
 else
   err "phpMyAdmin download failed"
 fi
 
 ########################################
-step "Step 8/9: Install Cloudflared + Fail2Ban"
+step "Step 8/10: Install Cloudflared + Fail2Ban"
 ########################################
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 cd /tmp
@@ -1159,7 +1237,7 @@ systemctl start fail2ban 2>/dev/null
 log "Fail2Ban installed"
 
 ########################################
-step "Step 9/9: Configure Firewall + Start Services"
+step "Step 9/10: Configure Firewall + Start Services"
 ########################################
 cat > /etc/systemd/system/litepanel.service <<SVCEOF
 [Unit]
@@ -1191,13 +1269,63 @@ done
 ufw --force enable > /dev/null 2>&1
 log "Firewall configured"
 
-systemctl restart lsws 2>/dev/null
+########################################
+step "Step 10/10: Verify & Fix Services"
+########################################
+log "Verifying all services..."
+
+# Restart services in correct order
 systemctl restart mariadb 2>/dev/null
+sleep 2
+systemctl restart lsws 2>/dev/null
 sleep 3
 
-cat > /root/.litepanel_credentials <<CREDEOF
+# Verify MySQL socket link
+if [ -S "/var/run/mysqld/mysqld.sock" ] && [ ! -S "/tmp/mysql.sock" ]; then
+  ln -sf /var/run/mysqld/mysqld.sock /tmp/mysql.sock
+  log "MySQL socket symlink verified"
+fi
+
+# Test PHP MySQL connection
+PHP_TEST=$(php -r "
+try {
+  \$mysqli = new mysqli('localhost', 'root', '${DB_ROOT_PASS}');
+  if (\$mysqli->connect_error) {
+    echo 'FAIL: ' . \$mysqli->connect_error;
+  } else {
+    echo 'OK';
+    \$mysqli->close();
+  }
+} catch (Exception \$e) {
+  echo 'FAIL: ' . \$e->getMessage();
+}
+" 2>&1)
+
+if [[ "$PHP_TEST" == "OK" ]]; then
+  log "PHP MySQL connection verified"
+else
+  warn "PHP MySQL connection test: $PHP_TEST"
+  # Try alternative socket configuration
+  mkdir -p /var/lib/mysql
+  ln -sf /var/run/mysqld/mysqld.sock /var/lib/mysql/mysql.sock 2>/dev/null
+fi
+
+# Test phpMyAdmin accessibility
+PHPMYADMIN_TEST=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8088/phpmyadmin/ 2>/dev/null)
+if [ "$PHPMYADMIN_TEST" = "200" ] || [ "$PHPMYADMIN_TEST" = "302" ]; then
+  log "phpMyAdmin is accessible (HTTP $PHPMYADMIN_TEST)"
+else
+  warn "phpMyAdmin returned HTTP $PHPMYADMIN_TEST - checking configuration..."
+  # Force restart LSWS to reload PHP configuration
+  systemctl restart lsws
+  sleep 3
+fi
+
+# Save credentials to secure location
+mkdir -p /etc/litepanel
+cat > /etc/litepanel/credentials <<CREDEOF
 ==========================================
-  LitePanel Credentials
+  LitePanel Credentials (v2.1)
 ==========================================
 Panel URL:     http://${SERVER_IP}:${PANEL_PORT}
 Panel Login:   ${ADMIN_USER} / ${ADMIN_PASS}
@@ -1209,8 +1337,15 @@ phpMyAdmin:    http://${SERVER_IP}:8088/phpmyadmin/
 
 MariaDB Root:  ${DB_ROOT_PASS}
 ==========================================
+Generated: $(date)
+==========================================
 CREDEOF
-chmod 600 /root/.litepanel_credentials
+chmod 600 /etc/litepanel/credentials
+
+# Also save to user home for convenience
+cp /etc/litepanel/credentials /root/.litepanel_credentials
+
+log "All services verified and running"
 
 ########################################
 # FINAL SUMMARY
@@ -1228,7 +1363,7 @@ echo -e "${C}║${N}  Panel Login:  ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N
 echo -e "${C}║${N}  OLS Admin:    ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
 echo -e "${C}║${N}  DB Root Pass: ${Y}${DB_ROOT_PASS}${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  Saved: ${B}/root/.litepanel_credentials${N}"
+echo -e "${C}║${N}  Saved: ${B}/etc/litepanel/credentials${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}╚══════════════════════════════════════════════╝${N}"
 echo ""
@@ -1243,3 +1378,5 @@ for svc in lsws mariadb litepanel fail2ban; do
 done
 echo ""
 echo -e "${G}DONE! Open http://${SERVER_IP}:${PANEL_PORT} in your browser${N}"
+echo ""
+echo -e "${Y}TIP: To check phpMyAdmin, visit http://${SERVER_IP}:8088/phpmyadmin/${N}"

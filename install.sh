@@ -1,6 +1,6 @@
 #!/bin/bash
 ############################################
-# LitePanel Installer v2.1 (Production)
+# LitePanel Installer v2.0 (Production)
 # Fresh Ubuntu 22.04 LTS Only
 ############################################
 
@@ -15,42 +15,25 @@ DB_ROOT_PASS="LitePanel$(date +%s | tail -c 6)Zx"
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 [ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
-INSTALL_LOG="/root/litepanel_install.log"
 
 # === COLORS ===
 G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; Y='\033[1;33m'; C='\033[0;36m'; N='\033[0m'
-step() { echo -e "\n${C}━━━ $1 ━━━${N}" | tee -a $INSTALL_LOG; }
-log()  { echo -e "${G}[✓]${N} $1" | tee -a $INSTALL_LOG; }
-err()  { echo -e "${R}[✗]${N} $1" | tee -a $INSTALL_LOG; }
-warn() { echo -e "${Y}[!]${N} $1" | tee -a $INSTALL_LOG; }
-debug() { echo "[DEBUG] $1" >> $INSTALL_LOG; }
-
-# === INITIALIZE LOG ===
-echo "LitePanel Installation Log - $(date)" > $INSTALL_LOG
-echo "=======================================" >> $INSTALL_LOG
+step() { echo -e "\n${C}━━━ $1 ━━━${N}"; }
+log()  { echo -e "${G}[✓]${N} $1"; }
+err()  { echo -e "${R}[✗]${N} $1"; }
+warn() { echo -e "${Y}[!]${N} $1"; }
 
 # === CHECK ROOT ===
-if [ "$EUID" -ne 0 ]; then
-  err "Please run as root!"
-  exit 1
-fi
-log "Root check passed"
+[ "$EUID" -ne 0 ] && echo "Run as root!" && exit 1
 
 # === CHECK OS ===
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   if [[ "$ID" != "ubuntu" ]] || [[ "$VERSION_ID" != "22.04" ]]; then
-    warn "This installer is designed for Ubuntu 22.04. Detected: $PRETTY_NAME"
+    warn "Designed for Ubuntu 22.04. Detected: $PRETTY_NAME"
     read -rp "Continue anyway? (y/n): " cont
     [[ "$cont" != "y" ]] && exit 1
-    echo "Continuing on non-standard OS: $PRETTY_NAME" >> $INSTALL_LOG
-  else
-    log "OS check passed: Ubuntu 22.04 detected"
   fi
-else
-  warn "Could not detect OS"
-  read -rp "Continue anyway? (y/n): " cont
-  [[ "$cont" != "y" ]] && exit 1
 fi
 
 # === WAIT FOR DPKG LOCK ===
@@ -58,12 +41,11 @@ while fuser /var/lib/dpkg/lock-frontend > /dev/null 2>&1; do
   warn "Waiting for other package manager to finish..."
   sleep 3
 done
-log "Package manager lock check passed"
 
 clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
-echo "  ║   LitePanel Installer v2.1       ║"
+echo "  ║   LitePanel Installer v2.0       ║"
 echo "  ║   Ubuntu 22.04 LTS              ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
@@ -72,33 +54,17 @@ sleep 2
 ########################################
 step "Step 1/9: Update System"
 ########################################
-apt-get update -y >> $INSTALL_LOG 2>&1
-if [ $? -ne 0 ]; then
-  err "System update failed. Check $INSTALL_LOG for details"
-  exit 1
-fi
-
-apt-get upgrade -y >> $INSTALL_LOG 2>&1
-if [ $? -ne 0 ]; then
-  warn "System upgrade had some issues. Continuing anyway..."
-else
-  log "System updated successfully"
-fi
+apt-get update -y -qq > /dev/null 2>&1
+apt-get upgrade -y -qq > /dev/null 2>&1
+log "System updated"
 
 ########################################
 step "Step 2/9: Install Dependencies"
 ########################################
-log "Installing essential packages..."
-
-apt-get install -y curl wget gnupg2 software-properties-common \
+apt-get install -y -qq curl wget gnupg2 software-properties-common \
   apt-transport-https ca-certificates lsb-release ufw git unzip \
-  openssl jq >> $INSTALL_LOG 2>&1
-
-if [ $? -ne 0 ]; then
-  err "Failed to install some dependencies. Check $INSTALL_LOG"
-  exit 1
-fi
-log "Dependencies installed successfully"
+  openssl jq > /dev/null 2>&1
+log "Dependencies installed"
 
 ########################################
 step "Step 3/9: Install OpenLiteSpeed + PHP 8.1"
@@ -109,13 +75,14 @@ REPO_ADDED=0
 
 # ============================================
 # METHOD 1: Official LiteSpeed repo script
+# (This is what LiteSpeed recommends)
 # ============================================
 log "Adding LiteSpeed repository (Method 1: official script)..."
-wget -O /tmp/ls_repo.sh https://repo.litespeed.sh >> $INSTALL_LOG 2>&1
+wget -qO /tmp/ls_repo.sh https://repo.litespeed.sh 2>/dev/null
 if [ -f /tmp/ls_repo.sh ] && [ -s /tmp/ls_repo.sh ]; then
-  bash /tmp/ls_repo.sh >> $INSTALL_LOG 2>&1
+  bash /tmp/ls_repo.sh > /dev/null 2>&1
   rm -f /tmp/ls_repo.sh
-  apt-get update -y >> $INSTALL_LOG 2>&1
+  apt-get update -y -qq > /dev/null 2>&1
 fi
 
 if apt-cache show openlitespeed > /dev/null 2>&1; then
@@ -129,21 +96,21 @@ fi
 if [ "$REPO_ADDED" -eq 0 ]; then
   warn "Method 1 failed, trying Method 2 (manual GPG)..."
   
-  wget -O /tmp/lst_repo.gpg https://rpms.litespeedtech.com/debian/lst_repo.gpg >> $INSTALL_LOG 2>&1
-  wget -O /tmp/lst_debian_repo.gpg https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg >> $INSTALL_LOG 2>&1
+  wget -qO /tmp/lst_repo.gpg https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null
+  wget -qO /tmp/lst_debian_repo.gpg https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>/dev/null
   
   if [ -f /tmp/lst_repo.gpg ] && [ -s /tmp/lst_repo.gpg ]; then
     # Try dearmor first, fallback to direct copy
-    gpg --dearmor < /tmp/lst_repo.gpg > /usr/share/keyrings/lst-debian.gpg 2>> $INSTALL_LOG
+    gpg --dearmor < /tmp/lst_repo.gpg > /usr/share/keyrings/lst-debian.gpg 2>/dev/null
     if [ ! -s /usr/share/keyrings/lst-debian.gpg ]; then
-      cp /tmp/lst_repo.gpg /usr/share/keyrings/lst-debian.gpg 2>> $INSTALL_LOG
+      cp /tmp/lst_repo.gpg /usr/share/keyrings/lst-debian.gpg 2>/dev/null
     fi
     
     echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
       > /etc/apt/sources.list.d/lst_debian_repo.list
   fi
   rm -f /tmp/lst_repo.gpg /tmp/lst_debian_repo.gpg
-  apt-get update -y >> $INSTALL_LOG 2>&1
+  apt-get update -y -qq > /dev/null 2>&1
   
   if apt-cache show openlitespeed > /dev/null 2>&1; then
     REPO_ADDED=1
@@ -157,13 +124,13 @@ fi
 if [ "$REPO_ADDED" -eq 0 ]; then
   warn "Method 2 failed, trying Method 3 (legacy apt-key)..."
   
-  wget -qO - https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>> $INSTALL_LOG | apt-key add - >> $INSTALL_LOG 2>&1
-  wget -qO - https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>> $INSTALL_LOG | apt-key add - >> $INSTALL_LOG 2>&1
+  wget -qO - https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null | apt-key add - 2>/dev/null
+  wget -qO - https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>/dev/null | apt-key add - 2>/dev/null
   
   echo "deb http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
     > /etc/apt/sources.list.d/lst_debian_repo.list
   
-  apt-get update -y >> $INSTALL_LOG 2>&1
+  apt-get update -y -qq > /dev/null 2>&1
   
   if apt-cache show openlitespeed > /dev/null 2>&1; then
     REPO_ADDED=1
@@ -201,54 +168,34 @@ if [ $OLS_RC -ne 0 ] || [ ! -d "/usr/local/lsws" ]; then
   tail -30 /tmp/ols_install.log
   echo ""
   err "═══════════════════════════════════════════════"
-  cat /tmp/ols_install.log >> $INSTALL_LOG
   exit 1
 fi
-log "OpenLiteSpeed installed successfully"
+log "OpenLiteSpeed installed"
 
 # ============================================
-# INSTALL PHP 8.1 WITH REQUIRED EXTENSIONS
+# INSTALL PHP 8.1 (split into required/optional)
 # ============================================
-log "Installing PHP 8.1 with all required extensions..."
-apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-mysqli lsphp81-curl \
-  lsphp81-json lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd \
-  lsphp81-intl lsphp81-iconv lsphp81-opcache > /tmp/php_install.log 2>&1
+log "Installing PHP 8.1..."
+apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl > /tmp/php_install.log 2>&1
 PHP_RC=$?
 
-if [ $PHP_RC -ne 0 ]; then
-  warn "Some PHP extensions might have failed to install. Check /tmp/php_install.log"
-  cat /tmp/php_install.log >> $INSTALL_LOG
-else
-  log "PHP 8.1 and extensions installed successfully"
-fi
+# Optional PHP extensions (OK if some fail)
+apt-get install -y -qq lsphp81-mbstring lsphp81-xml lsphp81-zip \
+  lsphp81-intl lsphp81-iconv lsphp81-opcache >> /tmp/php_install.log 2>&1
 
-# Verify critical extensions
-MISSING_EXTS=""
-for ext in mysqli json mysql gd; do
-  if [ ! -f "/usr/local/lsws/lsphp81/lib/php/20210902/$(echo $ext).so" ]; then
-    MISSING_EXTS="$MISSING_EXTS $ext"
-  fi
-done
-
-if [ ! -z "$MISSING_EXTS" ]; then
-  warn "Critical PHP extensions missing:$MISSING_EXTS"
-  warn "Will attempt to reinstall missing extensions..."
-  
-  for ext in $MISSING_EXTS; do
-    apt-get install -y lsphp81-$ext >> $INSTALL_LOG 2>&1
-  done
-fi
-
-# Create PHP symlink
 if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
-  ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>> $INSTALL_LOG
-  log "PHP 8.1 available as: $(php -v 2>/dev/null | head -1 | awk '{print $2}')"
+  ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
+  log "PHP 8.1 installed ($(php -v 2>/dev/null | head -1 | awk '{print $2}'))"
 else
-  warn "PHP binary not found at expected location. Path issues may occur."
+  if [ $PHP_RC -ne 0 ]; then
+    err "lsphp81 installation failed. Last 10 lines:"
+    tail -10 /tmp/php_install.log
+  fi
+  warn "lsphp81 binary not found - PHP might not work"
 fi
 
 # ============================================
-# CONFIGURE OPENLITESPEED
+# CONFIGURE OLS (only if config exists!)
 # ============================================
 OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
 
@@ -260,20 +207,16 @@ fi
 
 log "Configuring OpenLiteSpeed..."
 
-# Backup original config
-cp "$OLS_CONF" "$OLS_CONF.orig" 2>> $INSTALL_LOG
-log "Original OLS config backed up to $OLS_CONF.orig"
-
 # Set admin password (MD5 format, same method as CyberPanel)
 if [ -d "/usr/local/lsws/admin/conf" ]; then
   OLS_HASH=$(printf '%s' "${ADMIN_PASS}" | md5sum | awk '{print $1}')
   echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
-  log "OLS admin password set successfully"
+  log "OLS admin password set"
 else
-  warn "OLS admin conf directory not found, password not set"
+  warn "OLS admin conf directory not found"
 fi
 
-# Add lsphp81 extprocessor - checking to avoid duplicates
+# Add lsphp81 extprocessor
 if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'EXTEOF'
 
@@ -298,10 +241,10 @@ extprocessor lsphp81 {
   procHardLimit           1500
 }
 EXTEOF
-  log "lsphp81 extprocessor added to OLS config"
+  log "lsphp81 extprocessor added"
 fi
 
-# Add HTTP listener on port 80 and 8088 (for phpMyAdmin)
+# Add HTTP listener on port 80
 if ! grep -q "listener HTTP" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'LSTEOF'
 
@@ -310,321 +253,72 @@ listener HTTP {
   secure                  0
 }
 LSTEOF
-  log "HTTP listener on port 80 added"
-fi
-
-# Add specific listener for port 8088 (phpMyAdmin)
-if ! grep -q "listener phpMyAdmin" "$OLS_CONF"; then
-  cat >> "$OLS_CONF" <<'LSPMAEOF'
-
-listener phpMyAdmin {
-  address                 *:8088
-  secure                  0
-}
-LSPMAEOF
-  log "phpMyAdmin listener on port 8088 added"
+  log "HTTP listener port 80 added"
 fi
 
 # Update default lsphp path to lsphp81
-sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>> $INSTALL_LOG
+sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
 
 # Update Example vhost to use lsphp81 (for phpMyAdmin)
 EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
-if [ ! -d "/usr/local/lsws/conf/vhosts/Example" ]; then
-  mkdir -p /usr/local/lsws/conf/vhosts/Example
-  log "Created Example vhost directory"
+if [ -f "$EXAMPLE_VHCONF" ]; then
+  sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
+  log "Example vhost updated to lsphp81"
 fi
 
-# Create Example vhost config if it doesn't exist or update it
-if [ ! -f "$EXAMPLE_VHCONF" ] || ! grep -q "scripthandler" "$EXAMPLE_VHCONF"; then
-  cat > "$EXAMPLE_VHCONF" <<'VHEOF'
-docRoot                   $VH_ROOT/html
-vhDomain                  Example
-adminEmails               admin@localhost
-enableGzip                1
-enableIpGeo               0
-
-index {
-  useServer               0
-  indexFiles              index.html, index.php
-}
-
-scripthandler {
-  add                     lsapi:lsphp81 php
-}
-
-phpIniOverride {
-  php_admin_value upload_tmp_dir /tmp
-  php_admin_value session.save_path /tmp
-}
-
-expires {
-  enableExpires           1
-}
-
-accessControl {
-  allow                   *
-}
-
-context / {
-  location                $VH_ROOT/html
-  allowBrowse             1
-  
-  rewrite {
-    enable                0
-  }
-}
-
-context /phpmyadmin {
-  location                $VH_ROOT/html/phpmyadmin
-  allowBrowse             1
-  
-  rewrite {
-    enable                0
-  }
-  
-  addDefaultCharset       off
-  
-  phpIniOverride {
-    php_admin_value open_basedir "$VH_ROOT/html/phpmyadmin:/tmp"
-  }
-}
-
-rewrite {
-  enable                  0
-  logLevel                0
-}
-
-vhssl {
-  keyFile                 /usr/local/lsws/conf/example.key
-  certFile                /usr/local/lsws/conf/example.crt
-}
-VHEOF
-  log "Example vhost config created with lsphp81 handler"
-else
-  # Update existing config to use lsphp81
-  sed -i '/scripthandler/,/}/c\scripthandler {\n  add                     lsapi:lsphp81 php\n}' "$EXAMPLE_VHCONF" 2>> $INSTALL_LOG
-  
-  # Add phpMyAdmin context if not exists
-  if ! grep -q "context /phpmyadmin" "$EXAMPLE_VHCONF"; then
-    cat >> "$EXAMPLE_VHCONF" <<'PHPMAEOF'
-
-context /phpmyadmin {
-  location                $VH_ROOT/html/phpmyadmin
-  allowBrowse             1
-  
-  rewrite {
-    enable                0
-  }
-  
-  addDefaultCharset       off
-  
-  phpIniOverride {
-    php_admin_value open_basedir "$VH_ROOT/html/phpmyadmin:/tmp"
-  }
-}
-PHPMAEOF
-    log "Added phpMyAdmin context to Example vhost"
-  fi
-  log "Updated Example vhost to use lsphp81"
-fi
-
-# Make sure Example is added to virtual host list
-if ! grep -q "virtualhost Example {" "$OLS_CONF"; then
-  cat >> "$OLS_CONF" <<'EXVHEOF'
-
-virtualhost Example {
-  vhRoot                  /usr/local/lsws/Example
-  configFile              $SERVER_ROOT/conf/vhosts/Example/vhconf.conf
-  allowSymbolLink         1
-  enableScript            1
-  restrained              0
-}
-EXVHEOF
-  log "Added Example virtualhost to OLS config"
-fi
-
-# Map the phpMyAdmin listener to the Example vhost
-if grep -q "listener phpMyAdmin {" "$OLS_CONF"; then
-  # Look for the end of phpMyAdmin listener block
-  if ! grep -q "listener phpMyAdmin .*map.*Example" "$OLS_CONF"; then
-    sed -i '/listener phpMyAdmin {/,/}/s/}/  map                     Example Example\n}/' "$OLS_CONF"
-    log "Mapped phpMyAdmin listener to Example vhost"
-  fi
-fi
-
-# Make sure Example directory and html dir exist
-mkdir -p /usr/local/lsws/Example/html >> $INSTALL_LOG 2>&1
-if [ ! -f "/usr/local/lsws/Example/html/index.html" ]; then
-  echo "<html><body><h1>It works!</h1></body></html>" > /usr/local/lsws/Example/html/index.html
-fi
-chown -R nobody:nogroup /usr/local/lsws/Example 2>> $INSTALL_LOG
-
-# Start/Restart OpenLiteSpeed service
-systemctl enable lsws >> $INSTALL_LOG 2>&1
-systemctl restart lsws 2>> $INSTALL_LOG
+systemctl enable lsws > /dev/null 2>&1
+systemctl start lsws 2>/dev/null
 sleep 2
 
-# Check if OLS is running
 if systemctl is-active --quiet lsws 2>/dev/null; then
   log "OpenLiteSpeed started successfully"
 else
-  warn "OpenLiteSpeed failed to start - checking config... "
-  /usr/local/lsws/bin/lshttpd -t >> $INSTALL_LOG 2>&1
-  
-  if [ $? -eq 0 ]; then
-    log "Configuration test passed, attempting restart..."
-    systemctl restart lsws >> $INSTALL_LOG 2>&1
-    sleep 2
-    
-    if systemctl is-active --quiet lsws 2>/dev/null; then
-      log "OpenLiteSpeed started on second attempt"
-    else
-      err "OpenLiteSpeed won't start despite valid config. Check: systemctl status lsws"
-      systemctl status lsws -l >> $INSTALL_LOG 2>&1
-    fi
+  warn "OpenLiteSpeed failed to start - checking..."
+  systemctl status lsws --no-pager 2>&1 | tail -5
+  warn "Trying restart..."
+  systemctl restart lsws 2>/dev/null
+  sleep 2
+  if systemctl is-active --quiet lsws 2>/dev/null; then
+    log "OpenLiteSpeed started on retry"
   else
-    err "OpenLiteSpeed configuration has errors!"
-    /usr/local/lsws/bin/lshttpd -t 2>> $INSTALL_LOG
+    err "OpenLiteSpeed won't start. Check: systemctl status lsws"
   fi
 fi
 
 ########################################
 step "Step 4/9: Install MariaDB"
 ########################################
-log "Installing MariaDB server and client..."
-apt-get install -y mariadb-server mariadb-client >> $INSTALL_LOG 2>&1
+apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
+systemctl enable mariadb > /dev/null 2>&1
+systemctl start mariadb
 
-if [ $? -ne 0 ]; then
-  err "MariaDB installation failed. Check $INSTALL_LOG for details"
-  exit 1
-fi
-
-log "Enabling and starting MariaDB service..."
-systemctl enable mariadb >> $INSTALL_LOG 2>&1
-systemctl start mariadb >> $INSTALL_LOG 2>&1
-
-# Wait for MariaDB to start
-for i in $(seq 1 30); do
-  if mysqladmin ping --silent &>/dev/null; then
-    log "MariaDB started successfully"
-    break
-  elif [ $i -eq 30 ]; then
-    err "MariaDB failed to start in 30 seconds. Check systemctl status mariadb"
-    systemctl status mariadb -l >> $INSTALL_LOG 2>&1
-    exit 1
-  else
-    echo -n "."
-    sleep 1
-  fi
+for i in $(seq 1 15); do
+  mysqladmin ping &>/dev/null && break
+  sleep 2
 done
 
-# Secure the MariaDB installation
-log "Securing MariaDB installation..."
-mysql -u root -e "
-  ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
-  DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
-  DELETE FROM mysql.user WHERE User='';
-  DROP DATABASE IF EXISTS test;
-  FLUSH PRIVILEGES;
-" 2>> $INSTALL_LOG
-
-if [ $? -ne 0 ]; then
-  warn "MariaDB security setup had issues. Will attempt with mysql_native_password..."
-  
-  # Try with explicit plugin
+if mysqladmin ping &>/dev/null; then
   mysql -u root -e "
-    ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}';
-    DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+    ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
     DELETE FROM mysql.user WHERE User='';
     DROP DATABASE IF EXISTS test;
     FLUSH PRIVILEGES;
-  " 2>> $INSTALL_LOG
-  
-  if [ $? -eq 0 ]; then
-    log "MariaDB secured with mysql_native_password plugin"
-  else
-    err "Failed to secure MariaDB. Manual intervention required."
-    debug "$(mysqladmin version 2>&1)"
-  fi
+  " 2>/dev/null
+  log "MariaDB installed & secured"
 else
-  log "MariaDB secured successfully"
-fi
-
-# Ensure MariaDB is using mysql_native_password for maximum compatibility
-log "Checking MariaDB authentication plugin..."
-MYSQL_AUTH_PLUGIN=$(mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT plugin FROM mysql.user WHERE User='root' AND Host='localhost';" -s -N 2>/dev/null)
-
-if [ "$MYSQL_AUTH_PLUGIN" != "mysql_native_password" ]; then
-  log "Setting root authentication to mysql_native_password for better compatibility..."
-  mysql -u root -p"${DB_ROOT_PASS}" -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;" 2>> $INSTALL_LOG
-  
-  if [ $? -eq 0 ]; then
-    log "Root auth plugin changed to mysql_native_password"
-  else
-    warn "Could not change auth plugin. phpMyAdmin might have connection issues."
-  fi
-fi
-
-# Configure MariaDB for optimal performance
-if [ -d "/etc/mysql/mariadb.conf.d" ]; then
-  log "Optimizing MariaDB configuration..."
-  cat > /etc/mysql/mariadb.conf.d/99-litepanel-optimized.cnf <<MARIADBEOF
-[mysqld]
-# Performance optimizations
-innodb_buffer_pool_size = 128M
-innodb_flush_log_at_trx_commit = 2
-max_connections = 500
-query_cache_size = 0
-query_cache_type = 0
-
-# Compatibility settings
-default_authentication_plugin = mysql_native_password
-skip_name_resolve = ON
-
-# Character set
-character-set-server = utf8mb4
-collation-server = utf8mb4_unicode_ci
-MARIADBEOF
-
-  log "Added optimized MariaDB configuration"
-  systemctl restart mariadb >> $INSTALL_LOG 2>&1
-fi
-
-# Verify MariaDB connection
-if mysql -u root -p"${DB_ROOT_PASS}" -e "SHOW DATABASES;" &>> $INSTALL_LOG; then
-  log "MariaDB connection test successful"
-else
-  err "Cannot connect to MariaDB with new credentials"
+  err "MariaDB failed to start"
 fi
 
 ########################################
 step "Step 5/9: Install Node.js 18"
 ########################################
-log "Installing Node.js 18..."
-
 if ! command -v node > /dev/null 2>&1; then
-  curl -fsSL https://deb.nodesource.com/setup_18.x >> $INSTALL_LOG 2>&1 | bash - >> $INSTALL_LOG 2>&1
-  apt-get install -y nodejs >> $INSTALL_LOG 2>&1
-  
-  if [ $? -ne 0 ]; then
-    err "NodeJS installation failed. Check $INSTALL_LOG for details."
-    exit 1
-  fi
-else
-  log "Node.js is already installed, checking version..."
-  CURRENT_NODE_VER=$(node -v 2>/dev/null)
-  if [[ "$CURRENT_NODE_VER" =~ ^v18 ]]; then
-    log "Node.js $CURRENT_NODE_VER is already installed and meets version requirements"
-  else
-    warn "Node.js $CURRENT_NODE_VER is installed but may not be compatible. Proceeding anyway..."
-  fi
+  curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
+  apt-get install -y -qq nodejs > /dev/null 2>&1
 fi
 
-# Verify Node.js installation
 if command -v node > /dev/null 2>&1; then
-  log "Node.js $(node -v 2>/dev/null) installed successfully"
-  npm -v >> $INSTALL_LOG 2>&1
+  log "Node.js $(node -v 2>/dev/null) installed"
 else
   err "Node.js installation failed!"
   err "Manual install: curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt install nodejs"
@@ -634,9 +328,8 @@ fi
 ########################################
 step "Step 6/9: Creating LitePanel App"
 ########################################
-log "Creating LitePanel application directories..."
 mkdir -p ${PANEL_DIR}/{public/css,public/js}
-cd ${PANEL_DIR} || { err "Failed to change to ${PANEL_DIR}"; exit 1; }
+cd ${PANEL_DIR}
 
 # --- package.json ---
 cat > package.json <<'PKGEOF'
@@ -654,25 +347,25 @@ cat > package.json <<'PKGEOF'
 }
 PKGEOF
 
-log "Installing npm dependencies... (this may take a moment)"
-npm install --production >> $INSTALL_LOG 2>&1
+log "Installing npm dependencies..."
+npm install --production > /tmp/npm_install.log 2>&1
 NPM_RC=$?
 
 if [ $NPM_RC -ne 0 ]; then
-  warn "npm install failed, retrying with legacy-peer-deps..."
-  npm install --production --legacy-peer-deps >> $INSTALL_LOG 2>&1
+  warn "npm install failed (code $NPM_RC), retrying with legacy-peer-deps..."
+  npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
   NPM_RC=$?
 fi
 
 if [ $NPM_RC -ne 0 ]; then
-  err "npm install failed. Check $INSTALL_LOG for details"
-  cat /tmp/npm_install.log >> $INSTALL_LOG 2>&1
+  err "npm install failed. Check /tmp/npm_install.log"
+  tail -10 /tmp/npm_install.log
   exit 1
 fi
-log "npm dependencies installed successfully"
+log "npm dependencies installed"
 
 # --- config.json ---
-HASHED_PASS=$(node -e "console.log(require('bcryptjs').hashSync('${ADMIN_PASS}', 10))")
+HASHED_PASS=$(node -e "console.log(require('bcryptjs').hashSync('${ADMIN_PASS}', 10))" 2>/dev/null)
 SESSION_SECRET=$(openssl rand -hex 32)
 
 cat > config.json <<CFGEOF
@@ -1411,211 +1104,39 @@ window.chgPass=function(){
 checkAuth();
 JSEOF
 
-log "LitePanel app created successfully"
+log "LitePanel app created"
 
 ########################################
 step "Step 7/9: Install phpMyAdmin"
 ########################################
 PMA_DIR="/usr/local/lsws/Example/html/phpmyadmin"
-PMA_TEMP="/usr/local/lsws/Example/phpmyadmin_temp"
-
-# Create phpMyAdmin temp directory with proper permissions
-mkdir -p ${PMA_TEMP}
-chmod 770 ${PMA_TEMP}
-chown nobody:nogroup ${PMA_TEMP}
-log "Created phpMyAdmin temp directory with correct permissions"
-
-# Create parent directory for phpMyAdmin if it doesn't exist
-mkdir -p $(dirname ${PMA_DIR})
-log "Ensuring phpMyAdmin parent directory exists"
-
-# Download phpMyAdmin
-log "Downloading phpMyAdmin..."
-cd /tmp
-wget -O pma.tar.gz "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" >> $INSTALL_LOG 2>&1
-
-# Check if the download was successful
-if [ ! -f pma.tar.gz ] || [ ! -s pma.tar.gz ]; then
-  err "phpMyAdmin download failed! Trying alternative download..."
-  
-  # Try alternative download from GitHub
-  wget -O pma.tar.gz "https://github.com/phpmyadmin/phpmyadmin/archive/STABLE.tar.gz" >> $INSTALL_LOG 2>&1
-  
-  if [ ! -f pma.tar.gz ] || [ ! -s pma.tar.gz ]; then
-    err "phpMyAdmin alternative download failed too!"
-    exit 1
-  else
-    log "Alternative download successful"
-  fi
-fi
-
-# Extract phpMyAdmin
-log "Extracting phpMyAdmin..."
-mkdir -p /tmp/pma_extract
-tar xzf pma.tar.gz -C /tmp/pma_extract >> $INSTALL_LOG 2>&1
-
-if [ $? -ne 0 ]; then
-  err "Failed to extract phpMyAdmin. Check the archive integrity."
-  exit 1
-fi
-
-# Move to final location
-rm -rf ${PMA_DIR}
 mkdir -p ${PMA_DIR}
-cp -rf /tmp/pma_extract/*/* ${PMA_DIR}/ >> $INSTALL_LOG 2>&1
+cd /tmp
+wget -q "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null
+if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
+  tar xzf pma.tar.gz
+  cp -rf phpMyAdmin-*/* ${PMA_DIR}/
+  rm -rf phpMyAdmin-* pma.tar.gz
 
-# Clean up
-rm -rf /tmp/pma_extract pma.tar.gz
-
-# Verify phpMyAdmin was installed correctly
-if [ ! -f "${PMA_DIR}/index.php" ]; then
-  err "phpMyAdmin files not found after installation!"
-  err "Trying one more approach with direct download..."
-  
-  cd ${PMA_DIR}
-  wget -O pma.zip "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip" >> $INSTALL_LOG 2>&1
-  
-  if [ -f pma.zip ] && [ -s pma.zip ]; then
-    apt-get install -y unzip >> $INSTALL_LOG 2>&1
-    unzip -o pma.zip >> $INSTALL_LOG 2>&1
-    cp -rf phpMyAdmin*/* . >> $INSTALL_LOG 2>&1
-    rm -rf phpMyAdmin*/ pma.zip
-    
-    if [ -f "index.php" ]; then
-      log "phpMyAdmin successfully installed using zip approach"
-    else
-      err "All phpMyAdmin installation attempts failed!"
-      exit 1
-    fi
-  else
-    err "All phpMyAdmin download attempts failed!"
-    exit 1
-  fi
-fi
-
-# Create and configure config.inc.php
-log "Configuring phpMyAdmin..."
-BLOWFISH=$(openssl rand -hex 16)
-
-cat > ${PMA_DIR}/config.inc.php <<PMAEOF
+  BLOWFISH=$(openssl rand -hex 16)
+  cat > ${PMA_DIR}/config.inc.php <<PMAEOF
 <?php
-/* phpMyAdmin Configuration for LitePanel */
-
-/* Authentication type */
 \$cfg['blowfish_secret'] = '${BLOWFISH}';
 \$i = 0;
 \$i++;
-
-/* Server configuration */
-\$cfg['Servers'][\$i]['auth_type']     = 'cookie';
-\$cfg['Servers'][\$i]['host']          = 'localhost';
-\$cfg['Servers'][\$i]['connect_type']  = 'socket';
-\$cfg['Servers'][\$i]['socket']        = '/var/run/mysqld/mysqld.sock';
-\$cfg['Servers'][\$i]['compress']      = false;
-\$cfg['Servers'][\$i]['extension']     = 'mysqli';
+\$cfg['Servers'][\$i]['host'] = 'localhost';
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
-
-/* User for advanced features */
-\$cfg['Servers'][\$i]['controluser']   = 'pma';
-\$cfg['Servers'][\$i]['controlpass']   = '';
-
-/* Storage database and tables */
-\$cfg['Servers'][\$i]['pmadb']        = 'phpmyadmin';
-\$cfg['Servers'][\$i]['bookmarktable'] = 'pma__bookmark';
-\$cfg['Servers'][\$i]['relation']     = 'pma__relation';
-\$cfg['Servers'][\$i]['table_info']   = 'pma__table_info';
-\$cfg['Servers'][\$i]['table_coords'] = 'pma__table_coords';
-\$cfg['Servers'][\$i]['pdf_pages']    = 'pma__pdf_pages';
-\$cfg['Servers'][\$i]['column_info']  = 'pma__column_info';
-\$cfg['Servers'][\$i]['history']      = 'pma__history';
-\$cfg['Servers'][\$i]['table_uiprefs'] = 'pma__table_uiprefs';
-\$cfg['Servers'][\$i]['tracking']     = 'pma__tracking';
-\$cfg['Servers'][\$i]['userconfig']   = 'pma__userconfig';
-\$cfg['Servers'][\$i]['recent']       = 'pma__recent';
-\$cfg['Servers'][\$i]['favorite']     = 'pma__favorite';
-\$cfg['Servers'][\$i]['users']        = 'pma__users';
-\$cfg['Servers'][\$i]['usergroups']   = 'pma__usergroups';
-\$cfg['Servers'][\$i]['navigationhiding'] = 'pma__navigationhiding';
-\$cfg['Servers'][\$i]['savedsearches'] = 'pma__savedsearches';
-\$cfg['Servers'][\$i]['central_columns'] = 'pma__central_columns';
-\$cfg['Servers'][\$i]['designer_settings'] = 'pma__designer_settings';
-\$cfg['Servers'][\$i]['export_templates'] = 'pma__export_templates';
-
-/* End of servers configuration */
-\$cfg['DefaultLang']     = 'en';
-\$cfg['ServerDefault']   = 1;
-\$cfg['UploadDir']       = '${PMA_TEMP}';
-\$cfg['SaveDir']         = '${PMA_TEMP}';
-\$cfg['TempDir']         = '${PMA_TEMP}';
-\$cfg['MaxRows']         = 50;
-\$cfg['SendErrorReports'] = 'never';
-\$cfg['ShowPhpInfo']     = true;
-
-/* Directories for saving/loading files from server */
-\$cfg['UploadDir'] = '${PMA_TEMP}';
-\$cfg['SaveDir'] = '${PMA_TEMP}';
-
-/* Define advanced features */
-\$cfg['ExecTimeLimit'] = 300;
-\$cfg['MaxExactCount'] = 500000;
-\$cfg['MaxExactCountViews'] = 200000;
 PMAEOF
-
-# Optional: Create the control user and database if MariaDB is running
-if systemctl is-active --quiet mariadb; then
-  log "Creating phpMyAdmin database and control user..."
-  
-  # Generate a random password for the PMA control user
-  PMA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | fold -w 12 | head -n 1)
-  
-  # Update the config with the generated password
-  sed -i "s/\$cfg\['Servers'\]\[\$i\]\['controlpass'\] = '';/\$cfg\['Servers'\]\[\$i\]\['controlpass'\] = '${PMA_PASS}';/g" ${PMA_DIR}/config.inc.php
-  
-  # Create PMA database and user
-  mysql -u root -p"${DB_ROOT_PASS}" <<EOF >> $INSTALL_LOG 2>&1
-CREATE DATABASE IF NOT EXISTS phpmyadmin DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS 'pma'@'localhost' IDENTIFIED WITH mysql_native_password BY '${PMA_PASS}';
-GRANT SELECT, INSERT, UPDATE, DELETE ON phpmyadmin.* TO 'pma'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-
-  # Import the phpMyAdmin SQL schema if the file exists
-  if [ -f "${PMA_DIR}/sql/create_tables.sql" ]; then
-    mysql -u root -p"${DB_ROOT_PASS}" phpmyadmin < "${PMA_DIR}/sql/create_tables.sql" >> $INSTALL_LOG 2>&1
-    log "Imported phpMyAdmin database schema"
-  else
-    warn "phpMyAdmin SQL schema file not found, skipping database initialization"
-  fi
+  chown -R nobody:nogroup ${PMA_DIR}
+  log "phpMyAdmin installed"
 else
-  warn "MariaDB is not running - skipping creation of phpMyAdmin control user and database"
-  warn "After MariaDB starts, you may need to manually import the SQL schema"
+  err "phpMyAdmin download failed"
 fi
-
-# Set proper permissions for phpMyAdmin
-chown -R nobody:nogroup ${PMA_DIR}
-find ${PMA_DIR} -type d -exec chmod 755 {} \;
-find ${PMA_DIR} -type f -exec chmod 644 {} \;
-chmod 777 ${PMA_TEMP}
-
-log "phpMyAdmin installed and configured successfully"
-
-# Create a phpinfo file for troubleshooting
-cat > ${PMA_DIR}/phpinfo.php <<'PHPINFOEOF'
-<?php
-// Show PHP information
-phpinfo();
-PHPINFOEOF
-chmod 644 ${PMA_DIR}/phpinfo.php
-log "Created phpinfo.php for troubleshooting"
-
-# Restart OpenLiteSpeed to apply the new configuration
-systemctl restart lsws >> $INSTALL_LOG 2>&1
-log "OpenLiteSpeed restarted to apply phpMyAdmin configuration"
 
 ########################################
 step "Step 8/9: Install Cloudflared + Fail2Ban"
 ########################################
-log "Installing Cloudflared..."
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 cd /tmp
 if [ "$ARCH" = "arm64" ]; then
@@ -1623,84 +1144,27 @@ if [ "$ARCH" = "arm64" ]; then
 else
   CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
 fi
-wget -O cloudflared.deb "$CF_URL" >> $INSTALL_LOG 2>&1
+wget -q "$CF_URL" -O cloudflared.deb 2>/dev/null
 if [ -f cloudflared.deb ] && [ -s cloudflared.deb ]; then
-  dpkg -i cloudflared.deb >> $INSTALL_LOG 2>&1
+  dpkg -i cloudflared.deb > /dev/null 2>&1
   rm -f cloudflared.deb
-  log "Cloudflared installed successfully"
+  log "Cloudflared installed"
 else
-  warn "Cloudflared download failed, will need manual installation"
+  err "Cloudflared download failed"
 fi
 
-log "Installing and configuring Fail2Ban..."
-apt-get install -y fail2ban >> $INSTALL_LOG 2>&1
-if [ $? -ne 0 ]; then
-  warn "Fail2Ban installation had issues. Check $INSTALL_LOG"
-else
-  # Create basic configuration for SSH protection
-  cat > /etc/fail2ban/jail.d/litepanel-ssh.conf <<'F2BEOF'
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 3600
-findtime = 600
-F2BEOF
-
-  # Create OpenLiteSpeed protection if log exists
-  if [ -f "/usr/local/lsws/logs/error.log" ]; then
-    cat > /etc/fail2ban/jail.d/litepanel-ols.conf <<'F2BOLSEOF'
-[openlitespeed-admin]
-enabled = true
-port = 7080
-filter = openlitespeed-admin
-logpath = /usr/local/lsws/logs/error.log
-maxretry = 3
-bantime = 3600
-findtime = 600
-
-[openlitespeed-auth]
-enabled = true
-port = http,https
-filter = openlitespeed-auth
-logpath = /usr/local/lsws/logs/error.log
-maxretry = 5
-bantime = 3600
-findtime = 600
-F2BOLSEOF
-
-    cat > /etc/fail2ban/filter.d/openlitespeed-admin.conf <<'F2BOLSFILTEREOF'
-[Definition]
-failregex = \[ERROR\] \S+ WebAdmin authentication failed, IP <HOST>
-ignoreregex =
-F2BOLSFILTEREOF
-
-    cat > /etc/fail2ban/filter.d/openlitespeed-auth.conf <<'F2BOLSAUTHEOF'
-[Definition]
-failregex = \[ERROR\] .* access denied .* \[Unauthorized request from <HOST>\]
-            \[ERROR\] .* Basic authentication failed for user .* IP: <HOST>
-ignoreregex =
-F2BOLSAUTHEOF
-    log "Added Fail2Ban rules for OpenLiteSpeed"
-  fi
-
-  # Start and enable Fail2Ban
-  systemctl enable fail2ban >> $INSTALL_LOG 2>&1
-  systemctl restart fail2ban >> $INSTALL_LOG 2>&1
-  log "Fail2Ban configured and started"
-fi
+apt-get install -y -qq fail2ban > /dev/null 2>&1
+systemctl enable fail2ban > /dev/null 2>&1
+systemctl start fail2ban 2>/dev/null
+log "Fail2Ban installed"
 
 ########################################
 step "Step 9/9: Configure Firewall + Start Services"
 ########################################
-log "Creating systemd service for LitePanel..."
 cat > /etc/systemd/system/litepanel.service <<SVCEOF
 [Unit]
 Description=LitePanel Control Panel
 After=network.target mariadb.service
-Wants=mariadb.service
 
 [Service]
 Type=simple
@@ -1715,47 +1179,22 @@ WantedBy=multi-user.target
 SVCEOF
 
 systemctl daemon-reload
-systemctl enable litepanel >> $INSTALL_LOG 2>&1
-systemctl restart litepanel >> $INSTALL_LOG 2>&1
+systemctl enable litepanel > /dev/null 2>&1
+systemctl start litepanel
 
-log "Configuring firewall..."
-ufw --force reset >> $INSTALL_LOG 2>&1
-ufw default deny incoming >> $INSTALL_LOG 2>&1
-ufw default allow outgoing >> $INSTALL_LOG 2>&1
+ufw --force reset > /dev/null 2>&1
+ufw default deny incoming > /dev/null 2>&1
+ufw default allow outgoing > /dev/null 2>&1
 for port in 22 80 443 ${PANEL_PORT} 7080 8088; do
-  ufw allow ${port}/tcp >> $INSTALL_LOG 2>&1
-  log "Opened firewall port: $port"
+  ufw allow ${port}/tcp > /dev/null 2>&1
 done
-ufw --force enable >> $INSTALL_LOG 2>&1
-log "Firewall configured and enabled"
+ufw --force enable > /dev/null 2>&1
+log "Firewall configured"
 
-# Final service restarts to ensure everything is running
-log "Performing final service restarts..."
-systemctl restart lsws >> $INSTALL_LOG 2>&1
-systemctl restart mariadb >> $INSTALL_LOG 2>&1
-systemctl restart litepanel >> $INSTALL_LOG 2>&1
+systemctl restart lsws 2>/dev/null
+systemctl restart mariadb 2>/dev/null
 sleep 3
 
-# Verify services are running
-SERVICE_STATUS=""
-for svc in lsws mariadb litepanel fail2ban; do
-  if systemctl is-active --quiet $svc 2>/dev/null; then
-    SERVICE_STATUS="${SERVICE_STATUS}${G}[✓]${N} $svc running\n"
-  else
-    SERVICE_STATUS="${SERVICE_STATUS}${R}[✗]${N} $svc not running\n"
-  fi
-done
-
-# Verify phpMyAdmin is accessible
-log "Testing phpMyAdmin accessibility..."
-if curl -s http://localhost:8088/phpmyadmin/ | grep -q "phpMyAdmin"; then
-  log "phpMyAdmin is accessible!"
-else
-  warn "phpMyAdmin may not be accessible. Check config and restart OLS."
-  warn "curl -s http://localhost:8088/phpmyadmin/phpinfo.php to verify PHP is working"
-fi
-
-# Save credentials to a more secure file
 cat > /root/.litepanel_credentials <<CREDEOF
 ==========================================
   LitePanel Credentials
@@ -1769,12 +1208,9 @@ OLS Login:     admin / ${ADMIN_PASS}
 phpMyAdmin:    http://${SERVER_IP}:8088/phpmyadmin/
 
 MariaDB Root:  ${DB_ROOT_PASS}
-
-Installation Log: ${INSTALL_LOG}
 ==========================================
 CREDEOF
 chmod 600 /root/.litepanel_credentials
-log "Credentials saved to /root/.litepanel_credentials"
 
 ########################################
 # FINAL SUMMARY
@@ -1793,13 +1229,17 @@ echo -e "${C}║${N}  OLS Admin:    ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
 echo -e "${C}║${N}  DB Root Pass: ${Y}${DB_ROOT_PASS}${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}║${N}  Saved: ${B}/root/.litepanel_credentials${N}"
-echo -e "${C}║${N}  Logs:  ${B}${INSTALL_LOG}${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}╚══════════════════════════════════════════════╝${N}"
 echo ""
 
 echo -e "${B}Service Status:${N}"
-echo -e "$SERVICE_STATUS"
+for svc in lsws mariadb litepanel fail2ban; do
+  if systemctl is-active --quiet $svc 2>/dev/null; then
+    echo -e "  ${G}[✓]${N} $svc running"
+  else
+    echo -e "  ${R}[✗]${N} $svc not running"
+  fi
+done
 echo ""
 echo -e "${G}DONE! Open http://${SERVER_IP}:${PANEL_PORT} in your browser${N}"
-echo -e "${Y}phpMyAdmin is available at http://${SERVER_IP}:8088/phpmyadmin/${N}"

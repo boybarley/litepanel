@@ -1,374 +1,793 @@
 #!/bin/bash
-# OpenLiteSpeed + LitePanel + Cloudflare Automation Installer
-# Version: 2.0
-# Compatible with existing installations
+############################################
+# LitePanel Pro Installer v3.0
+# Complete All-in-One Installer
+# Fresh Ubuntu 22.04 LTS Only
+# With Advanced Cloudflare & File Manager
+############################################
 
-set -e
+export DEBIAN_FRONTEND=noninteractive
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# === CONFIG ===
+PANEL_DIR="/opt/litepanel-pro"
+PANEL_PORT=3000
+ADMIN_USER="admin"
+ADMIN_PASS=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-16)
+DB_ROOT_PASS="LitePanel$(openssl rand -hex 8)"
+SESSION_SECRET=$(openssl rand -hex 32)
+ENCRYPTION_KEY=$(openssl rand -hex 16)
+JWT_SECRET=$(openssl rand -hex 32)
+SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
+[ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
 
-# Variables
-PANEL_PATH="/usr/local/lsws/vhosts/panel"
-LSWS_PATH="/usr/local/lsws"
-CONFIG_PATH="/usr/local/lsws/conf"
-INSTALLER_VERSION="2.0"
-INSTALLER_LOG="/root/litepanel-installer.log"
+# === COLORS ===
+G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; Y='\033[1;33m'; C='\033[0;36m'; M='\033[0;35m'; N='\033[0m'
+step() { echo -e "\n${C}━━━ $1 ━━━${N}"; }
+log()  { echo -e "${G}[✓]${N} $1"; }
+err()  { echo -e "${R}[✗]${N} $1"; }
+warn() { echo -e "${Y}[!]${N} $1"; }
+info() { echo -e "${B}[i]${N} $1"; }
 
-# Logging
-log() {
-    echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a $INSTALLER_LOG
-}
+# === CHECK ROOT ===
+[ "$EUID" -ne 0 ] && err "Run as root!" && exit 1
 
-error() {
-    echo -e "${RED}[ERROR]${NC} $1" | tee -a $INSTALLER_LOG
-    exit 1
-}
-
-warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a $INSTALLER_LOG
-}
-
-# Check if running as root
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        error "This script must be run as root"
-    fi
-}
-
-# Detect existing installation
-detect_existing() {
-    log "Detecting existing installation..."
-    
-    EXISTING_INSTALL=false
-    EXISTING_PANEL=false
-    EXISTING_CF=false
-    
-    if [ -d "$LSWS_PATH" ]; then
-        EXISTING_INSTALL=true
-        log "OpenLiteSpeed detected"
-    fi
-    
-    if [ -d "$PANEL_PATH" ]; then
-        EXISTING_PANEL=true
-        log "LitePanel detected"
-    fi
-    
-    if [ -f "$CONFIG_PATH/cloudflare-api.conf" ]; then
-        EXISTING_CF=true
-        log "Cloudflare integration detected"
-    fi
-}
-
-# Backup existing configuration
-backup_existing() {
-    if [ "$EXISTING_INSTALL" = true ]; then
-        log "Backing up existing configuration..."
-        BACKUP_DIR="/root/litepanel-backup-$(date +%Y%m%d_%H%M%S)"
-        mkdir -p $BACKUP_DIR
-        
-        # Backup important configs
-        cp -r $CONFIG_PATH $BACKUP_DIR/ 2>/dev/null || true
-        cp -r $PANEL_PATH $BACKUP_DIR/ 2>/dev/null || true
-        
-        log "Backup saved to $BACKUP_DIR"
-    fi
-}
-
-# Install dependencies
-install_dependencies() {
-    log "Installing dependencies..."
-    
-    apt-get update
-    apt-get install -y \
-        curl \
-        wget \
-        git \
-        unzip \
-        software-properties-common \
-        build-essential \
-        python3-pip \
-        jq \
-        certbot \
-        ufw \
-        fail2ban \
-        htop \
-        nano
-    
-    # Install Python packages
-    pip3 install cloudflare requests
-}
-
-# Install OpenLiteSpeed (skip if exists)
-install_openlitespeed() {
-    if [ "$EXISTING_INSTALL" = true ]; then
-        log "OpenLiteSpeed already installed, skipping..."
-        return
-    fi
-    
-    log "Installing OpenLiteSpeed..."
-    
-    wget -qO - https://repo.litespeed.sh | bash
-    apt-get install -y openlitespeed
-    
-    # Set admin password
-    ADMIN_PASS=$(openssl rand -base64 12)
-    /usr/local/lsws/admin/misc/admpass.sh << EOF
-admin
-$ADMIN_PASS
-$ADMIN_PASS
-EOF
-    
-    echo "OpenLiteSpeed Admin Password: $ADMIN_PASS" > /root/ols-credentials.txt
-    
-    # Install PHP
-    apt-get install -y lsphp81 lsphp81-mysql lsphp81-common \
-        lsphp81-opcache lsphp81-curl lsphp81-imagick \
-        lsphp81-redis lsphp81-memcached lsphp81-imap
-    
-    # Configure PHP
-    ln -sf /usr/local/lsws/lsphp81/bin/php /usr/bin/php
-}
-
-# Setup Cloudflare Integration
-setup_cloudflare() {
-    log "Setting up Cloudflare integration..."
-    
-    # Check if already configured
-    if [ "$EXISTING_CF" = true ]; then
-        read -p "Cloudflare already configured. Reconfigure? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log "Keeping existing Cloudflare configuration"
-            return
-        fi
-    fi
-    
-    # Get Cloudflare credentials
-    echo -e "${BLUE}=== Cloudflare API Configuration ===${NC}"
-    echo "To create a Global API Token:"
-    echo "1. Go to https://dash.cloudflare.com/profile/api-tokens"
-    echo "2. Click 'Create Token'"
-    echo "3. Use 'Edit zone DNS' template"
-    echo "4. Zone Resources: Include → All zones"
-    echo "5. Continue → Create Token"
-    echo
-    
-    read -p "Enter your Cloudflare Email: " CF_EMAIL
-    read -sp "Enter your Cloudflare Global API Token: " CF_TOKEN
-    echo
-    read -p "Enter your Cloudflare Account ID: " CF_ACCOUNT_ID
-    
-    # Save credentials securely
-    cat > $CONFIG_PATH/cloudflare-api.conf << EOF
-# Cloudflare API Credentials
-export CF_Email="$CF_EMAIL"
-export CF_Token="$CF_TOKEN"
-export CF_Account_ID="$CF_ACCOUNT_ID"
-EOF
-    
-    chmod 600 $CONFIG_PATH/cloudflare-api.conf
-    
-    # Create zones config
-    touch $CONFIG_PATH/cloudflare-zones.conf
-    chmod 600 $CONFIG_PATH/cloudflare-zones.conf
-    
-    # Setup acme.sh
-    if [ ! -d "/root/.acme.sh" ]; then
-        curl https://get.acme.sh | sh -s email=$CF_EMAIL
-    fi
-    
-    # Configure acme.sh
-    source $CONFIG_PATH/cloudflare-api.conf
-    /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-    
-    log "Cloudflare integration configured!"
-}
-
-# Create domain management scripts
-create_domain_scripts() {
-    log "Creating domain management scripts..."
-    
-    # Main domain management script
-    cat > $LSWS_PATH/bin/manage-domain.sh << 'SCRIPT'
-#!/bin/bash
-# Domain Management Script with Cloudflare Integration
-
-set -e
-
-DOMAIN=$1
-ACTION=${2:-add}
-
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# Paths
-VHOST_PATH="/usr/local/lsws/vhosts"
-CONFIG_PATH="/usr/local/lsws/conf"
-
-# Load Cloudflare credentials
-if [ -f "$CONFIG_PATH/cloudflare-api.conf" ]; then
-    source $CONFIG_PATH/cloudflare-api.conf
-else
-    echo -e "${RED}Error: Cloudflare not configured${NC}"
-    exit 1
+# === CHECK OS ===
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  if [[ "$ID" != "ubuntu" ]] || [[ "$VERSION_ID" != "22.04" ]]; then
+    warn "Designed for Ubuntu 22.04. Detected: $PRETTY_NAME"
+    read -rp "Continue anyway? (y/n): " cont
+    [[ "$cont" != "y" ]] && exit 1
+  fi
 fi
 
-# Functions
-log_success() { echo -e "${GREEN}✓ $1${NC}"; }
-log_error() { echo -e "${RED}✗ $1${NC}"; exit 1; }
-log_info() { echo -e "${YELLOW}→ $1${NC}"; }
+# === WAIT FOR DPKG LOCK ===
+while fuser /var/lib/dpkg/lock-frontend > /dev/null 2>&1; do
+  warn "Waiting for other package manager to finish..."
+  sleep 3
+done
 
-# Get server IP
-get_server_ip() {
-    curl -s ifconfig.me || curl -s icanhazip.com
-}
-
-# Add domain to Cloudflare
-add_to_cloudflare() {
-    local domain=$1
-    log_info "Adding $domain to Cloudflare..."
-    
-    # Check if zone exists
-    ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$domain" \
-        -H "Authorization: Bearer $CF_Token" \
-        -H "Content-Type: application/json" | jq -r '.result[0].id')
-    
-    if [ "$ZONE_ID" == "null" ] || [ -z "$ZONE_ID" ]; then
-        # Create new zone
-        RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones" \
-            -H "Authorization: Bearer $CF_Token" \
-            -H "Content-Type: application/json" \
-            --data "{\"name\":\"$domain\",\"account\":{\"id\":\"$CF_Account_ID\"},\"jump_start\":true}")
-        
-        ZONE_ID=$(echo $RESPONSE | jq -r '.result.id')
-        
-        if [ "$ZONE_ID" != "null" ] && [ -n "$ZONE_ID" ]; then
-            log_success "Domain added to Cloudflare"
-            
-            # Show nameservers
-            echo -e "\n${YELLOW}IMPORTANT: Update nameservers at your domain registrar:${NC}"
-            echo $RESPONSE | jq -r '.result.name_servers[]' | while read ns; do
-                echo "  → $ns"
-            done
-            echo
-        else
-            log_error "Failed to add domain to Cloudflare: $(echo $RESPONSE | jq -r '.errors[0].message')"
-        fi
-    else
-        log_success "Domain already exists in Cloudflare (Zone ID: $ZONE_ID)"
-    fi
-    
-    # Save Zone ID
-    echo "export CF_Zone_ID_${domain//./_}=\"$ZONE_ID\"" >> $CONFIG_PATH/cloudflare-zones.conf
-    
-    # Add DNS records
-    add_dns_records $domain $ZONE_ID
-}
-
-# Add DNS records
-add_dns_records() {
-    local domain=$1
-    local zone_id=$2
-    local server_ip=$(get_server_ip)
-    
-    log_info "Adding DNS records for IP: $server_ip"
-    
-    # Check existing records
-    EXISTING_A=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
-        -H "Authorization: Bearer $CF_Token" | jq -r '.result[0].id')
-    
-    # Add/Update A record for root domain
-    if [ "$EXISTING_A" != "null" ] && [ -n "$EXISTING_A" ]; then
-        curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$EXISTING_A" \
-            -H "Authorization: Bearer $CF_Token" \
-            -H "Content-Type: application/json" \
-            --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$server_ip\",\"ttl\":1,\"proxied\":true}" \
-            > /dev/null
-    else
-        curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
-            -H "Authorization: Bearer $CF_Token" \
-            -H "Content-Type: application/json" \
-            --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$server_ip\",\"ttl\":1,\"proxied\":true}" \
-            > /dev/null
-    fi
-    
-    # Add A record for www
-    curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
-        -H "Authorization: Bearer $CF_Token" \
-        -H "Content-Type: application/json" \
-        --data "{\"type\":\"A\",\"name\":\"www.$domain\",\"content\":\"$server_ip\",\"ttl\":1,\"proxied\":true}" \
-        > /dev/null 2>&1
-    
-    log_success "DNS records configured"
-}
-
-# Create vhost in OpenLiteSpeed
-create_vhost() {
-    local domain=$1
-    
-    log_info "Creating vhost for $domain..."
-    
-    # Create directories
-    mkdir -p $VHOST_PATH/$domain/{html,logs,conf,ssl}
-    
-    # Create default index
-    cat > $VHOST_PATH/$domain/html/index.php << EOF
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Welcome to $domain</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-        h1 { color: #333; }
-        .info { background: #f0f0f0; padding: 20px; border-radius: 8px; margin: 20px auto; max-width: 600px; }
-    </style>
-</head>
-<body>
-    <h1>🎉 $domain is working!</h1>
-    <div class="info">
-        <p>PHP Version: <?php echo phpversion(); ?></p>
-        <p>Server: OpenLiteSpeed</p>
-        <p>Protected by Cloudflare</p>
-    </div>
-</body>
-</html>
+clear
+echo -e "${M}"
+cat << "EOF"
+   __    _ __       ____                  __   ____           
+  / /   (_) /____  / __ \____ _____  ___  / /  / __ \_________ 
+ / /   / / __/ _ \/ /_/ / __ `/ __ \/ _ \/ /  / /_/ / ___/ __ \
+/ /___/ / /_/  __/ ____/ /_/ / / / /  __/ /  / ____/ /  / /_/ /
+/_____/_/\__/\___/_/    \__,_/_/ /_/\___/_/  /_/   /_/   \____/ 
+                                                                 
 EOF
-    
-    # Set permissions
-    chown -R nobody:nogroup $VHOST_PATH/$domain
-    
-    # Create vhost config
-    mkdir -p $CONFIG_PATH/vhosts/$domain
-    cat > $CONFIG_PATH/vhosts/$domain/vhconf.conf << EOF
-docRoot                   \$VH_ROOT/html
-vhDomain                  $domain
-vhAliases                 www.$domain
+echo -e "${N}"
+echo -e "${C}Version 3.0 - Enterprise Multi-Domain Cloudflare Panel${N}"
+echo -e "${C}══════════════════════════════════════════════════════${N}\n"
+sleep 2
+
+########################################
+step "Step 1/12: Update System"
+########################################
+apt-get update -y -qq > /dev/null 2>&1
+apt-get upgrade -y -qq > /dev/null 2>&1
+log "System updated"
+
+########################################
+step "Step 2/12: Install Dependencies"
+########################################
+apt-get install -y -qq curl wget gnupg2 software-properties-common \
+  apt-transport-https ca-certificates lsb-release ufw git unzip \
+  openssl jq build-essential redis-server sqlite3 > /dev/null 2>&1
+log "Dependencies installed"
+
+########################################
+step "Step 3/12: Install OpenLiteSpeed + PHP 8.1"
+########################################
+wget -O - https://repo.litespeed.sh 2>/dev/null | bash > /dev/null 2>&1
+apt-get update -y -qq > /dev/null 2>&1
+apt-get install -y openlitespeed > /dev/null 2>&1
+
+if [ ! -d "/usr/local/lsws" ]; then
+  err "OpenLiteSpeed installation failed!"
+  exit 1
+fi
+
+# Install PHP 8.1 and extensions
+apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl \
+  lsphp81-intl lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-json \
+  lsphp81-opcache lsphp81-sqlite3 > /dev/null 2>&1
+
+ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
+log "OpenLiteSpeed and PHP 8.1 installed"
+
+########################################
+step "Step 4/12: Install MariaDB"
+########################################
+apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
+systemctl enable mariadb > /dev/null 2>&1
+systemctl start mariadb
+
+# Secure MariaDB
+mysql -u root -e "
+  ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
+  DELETE FROM mysql.user WHERE User='';
+  DROP DATABASE IF EXISTS test;
+  FLUSH PRIVILEGES;
+" 2>/dev/null
+
+log "MariaDB installed & secured"
+
+########################################
+step "Step 5/12: Install Node.js 18"
+########################################
+curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
+apt-get install -y -qq nodejs > /dev/null 2>&1
+log "Node.js $(node -v 2>/dev/null) installed"
+
+########################################
+step "Step 6/12: Creating LitePanel Pro Structure"
+########################################
+mkdir -p ${PANEL_DIR}/{src/{controllers,services,middleware,models,utils,routes},public/{css,js},database,logs,temp}
+cd ${PANEL_DIR}
+
+########################################
+step "Step 7/12: Creating Core Application Files"
+########################################
+
+# === package.json ===
+cat > package.json <<'PKGEOF'
+{
+  "name": "litepanel-pro",
+  "version": "3.0.0",
+  "description": "Enterprise Multi-Domain Cloudflare Management Panel",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "express-rate-limit": "^6.10.0",
+    "bcryptjs": "^2.4.3",
+    "multer": "^1.4.5-lts.1",
+    "sqlite3": "^5.1.6",
+    "dotenv": "^16.3.1",
+    "helmet": "^7.0.0",
+    "cors": "^2.8.5",
+    "compression": "^1.7.4",
+    "axios": "^1.4.0",
+    "joi": "^17.9.2",
+    "winston": "^3.10.0",
+    "archiver": "^5.3.1",
+    "unzipper": "^0.10.14",
+    "mime-types": "^2.1.35"
+  }
+}
+PKGEOF
+
+# === .env ===
+cat > .env <<ENVEOF
+# Server Configuration
+NODE_ENV=production
+PANEL_PORT=${PANEL_PORT}
+SESSION_SECRET=${SESSION_SECRET}
+
+# Database
+DB_PATH=./database/litepanel.db
+
+# Redis Cache
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+# Security
+ENCRYPTION_KEY=${ENCRYPTION_KEY}
+JWT_SECRET=${JWT_SECRET}
+
+# Admin Credentials
+ADMIN_USER=${ADMIN_USER}
+ADMIN_PASS=${ADMIN_PASS}
+
+# MariaDB
+DB_ROOT_PASS=${DB_ROOT_PASS}
+
+# File Manager
+MAX_UPLOAD_SIZE=100MB
+ALLOWED_FILE_TYPES=.jpg,.jpeg,.png,.gif,.pdf,.doc,.docx,.txt,.zip,.tar,.gz
+
+# Logging
+LOG_LEVEL=info
+LOG_DIR=./logs
+ENVEOF
+
+log "Installing npm dependencies..."
+npm install --production > /tmp/npm_install.log 2>&1 || {
+  warn "npm install failed, retrying..."
+  npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
+}
+log "Dependencies installed"
+
+########################################
+# === app.js (Main Application) ===
+########################################
+cat > app.js <<'APPEOF'
+const express = require('express');
+const session = require('express-session');
+const helmet = require('helmet');
+const cors = require('cors');
+const compression = require('compression');
+const path = require('path');
+const http = require('http');
+require('dotenv').config();
+
+const logger = require('./src/utils/logger');
+const database = require('./src/utils/database');
+const routes = require('./src/routes');
+
+class LitePanelApp {
+  constructor() {
+    this.app = express();
+    this.server = http.createServer(this.app);
+  }
+
+  async initialize() {
+    try {
+      // Initialize database
+      await database.initialize();
+      logger.info('Database initialized');
+
+      // Setup middleware
+      this.setupMiddleware();
+
+      // Setup routes
+      this.setupRoutes();
+
+      // Start server
+      const port = process.env.PANEL_PORT || 3000;
+      this.server.listen(port, '0.0.0.0', () => {
+        logger.info(`LitePanel Pro running on port ${port}`);
+      });
+
+    } catch (error) {
+      logger.error('Failed to initialize application:', error);
+      process.exit(1);
+    }
+  }
+
+  setupMiddleware() {
+    // Security headers
+    this.app.use(helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+          imgSrc: ["'self'", "data:", "https:"],
+          connectSrc: ["'self'"]
+        }
+      }
+    }));
+
+    this.app.use(cors());
+    this.app.use(compression());
+    this.app.use(express.json({ limit: '50mb' }));
+    this.app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+    // Session
+    this.app.use(session({
+      secret: process.env.SESSION_SECRET,
+      resave: false,
+      saveUninitialized: false,
+      cookie: {
+        secure: false,
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000,
+        sameSite: 'strict'
+      }
+    }));
+
+    // Static files
+    this.app.use(express.static(path.join(__dirname, 'public')));
+  }
+
+  setupRoutes() {
+    this.app.use('/api', routes);
+    this.app.get('*', (req, res) => {
+      res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    });
+  }
+}
+
+const app = new LitePanelApp();
+app.initialize().catch(console.error);
+
+process.on('SIGINT', async () => {
+  logger.info('Shutting down gracefully...');
+  await database.close();
+  process.exit(0);
+});
+APPEOF
+
+########################################
+# === src/utils/logger.js ===
+########################################
+cat > src/utils/logger.js <<'LOGEOF'
+const winston = require('winston');
+const path = require('path');
+
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    }),
+    new winston.transports.File({
+      filename: path.join(process.env.LOG_DIR || './logs', 'error.log'),
+      level: 'error'
+    }),
+    new winston.transports.File({
+      filename: path.join(process.env.LOG_DIR || './logs', 'combined.log')
+    })
+  ]
+});
+
+module.exports = logger;
+LOGEOF
+
+########################################
+# === src/utils/database.js ===
+########################################
+cat > src/utils/database.js <<'DBEOF'
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const fs = require('fs').promises;
+const bcrypt = require('bcryptjs');
+const logger = require('./logger');
+
+class Database {
+  constructor() {
+    this.db = null;
+  }
+
+  async initialize() {
+    const dbPath = path.resolve(process.env.DB_PATH || './database/litepanel.db');
+    const dbDir = path.dirname(dbPath);
+    await fs.mkdir(dbDir, { recursive: true });
+
+    return new Promise((resolve, reject) => {
+      this.db = new sqlite3.Database(dbPath, (err) => {
+        if (err) {
+          logger.error('Failed to open database:', err);
+          reject(err);
+        } else {
+          logger.info('Database connected');
+          this.createTables().then(resolve).catch(reject);
+        }
+      });
+    });
+  }
+
+  async createTables() {
+    const queries = [
+      `CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        email TEXT,
+        role TEXT DEFAULT 'admin',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE TABLE IF NOT EXISTS cloudflare_accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        api_token TEXT NOT NULL,
+        account_id TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE TABLE IF NOT EXISTS domains (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        cloudflare_account_id INTEGER,
+        cloudflare_zone_id TEXT,
+        status TEXT DEFAULT 'active',
+        ssl_mode TEXT DEFAULT 'flexible',
+        doc_root TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (cloudflare_account_id) REFERENCES cloudflare_accounts(id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS activity_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        action TEXT NOT NULL,
+        resource TEXT,
+        details TEXT,
+        ip_address TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`
+    ];
+
+    for (const query of queries) {
+      await this.run(query);
+    }
+
+    // Create default admin user
+    const adminExists = await this.get('SELECT id FROM users WHERE username = ?', [process.env.ADMIN_USER]);
+    if (!adminExists) {
+      const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASS, 10);
+      await this.run(
+        'INSERT INTO users (username, password, email, role) VALUES (?, ?, ?, ?)',
+        [process.env.ADMIN_USER, hashedPassword, 'admin@localhost', 'admin']
+      );
+      logger.info('Default admin user created');
+    }
+  }
+
+  run(query, params = []) {
+    return new Promise((resolve, reject) => {
+      this.db.run(query, params, function(err) {
+        if (err) reject(err);
+        else resolve({ id: this.lastID, changes: this.changes });
+      });
+    });
+  }
+
+  get(query, params = []) {
+    return new Promise((resolve, reject) => {
+      this.db.get(query, params, (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
+  }
+
+  all(query, params = []) {
+    return new Promise((resolve, reject) => {
+      this.db.all(query, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+  }
+
+  async close() {
+    return new Promise((resolve) => {
+      if (this.db) {
+        this.db.close(() => resolve());
+      } else {
+        resolve();
+      }
+    });
+  }
+}
+
+module.exports = new Database();
+DBEOF
+
+########################################
+# === src/routes/index.js ===
+########################################
+cat > src/routes/index.js <<'ROUTEEOF'
+const express = require('express');
+const router = express.Router();
+const authController = require('../controllers/auth.controller');
+const dashboardController = require('../controllers/dashboard.controller');
+const domainController = require('../controllers/domain.controller');
+const fileController = require('../controllers/file.controller');
+const cloudflareController = require('../controllers/cloudflare.controller');
+const { auth } = require('../middleware/auth.middleware');
+
+// Public routes
+router.post('/auth/login', authController.login);
+router.get('/auth/check', authController.check);
+router.post('/auth/logout', authController.logout);
+
+// Protected routes
+router.use(auth); // All routes below require authentication
+
+// Dashboard
+router.get('/dashboard', dashboardController.getStats);
+router.get('/services', dashboardController.getServices);
+router.post('/services/:name/:action', dashboardController.controlService);
+
+// Domains
+router.get('/domains', domainController.list);
+router.post('/domains', domainController.create);
+router.delete('/domains/:name', domainController.remove);
+
+// File Manager
+router.get('/files', fileController.list);
+router.get('/files/download', fileController.download);
+router.post('/files/upload', fileController.upload);
+router.post('/files/create', fileController.create);
+router.put('/files', fileController.update);
+router.delete('/files', fileController.remove);
+router.post('/files/rename', fileController.rename);
+router.post('/files/extract', fileController.extract);
+router.post('/files/compress', fileController.compress);
+
+// Cloudflare
+router.get('/cloudflare/accounts', cloudflareController.listAccounts);
+router.post('/cloudflare/accounts', cloudflareController.addAccount);
+router.delete('/cloudflare/accounts/:id', cloudflareController.removeAccount);
+router.get('/cloudflare/zones/:accountId', cloudflareController.listZones);
+router.post('/cloudflare/zones/:accountId', cloudflareController.createZone);
+router.get('/cloudflare/dns/:zoneId', cloudflareController.listDNS);
+router.post('/cloudflare/dns/:zoneId', cloudflareController.createDNS);
+router.put('/cloudflare/dns/:zoneId/:recordId', cloudflareController.updateDNS);
+router.delete('/cloudflare/dns/:zoneId/:recordId', cloudflareController.deleteDNS);
+router.post('/cloudflare/cache/:zoneId/purge', cloudflareController.purgeCache);
+
+module.exports = router;
+ROUTEEOF
+
+########################################
+# === src/middleware/auth.middleware.js ===
+########################################
+cat > src/middleware/auth.middleware.js <<'AUTHEOF'
+function auth(req, res, next) {
+  if (req.session && req.session.user) {
+    return next();
+  }
+  res.status(401).json({ error: 'Unauthorized' });
+}
+
+module.exports = { auth };
+AUTHEOF
+
+########################################
+# === src/controllers/auth.controller.js ===
+########################################
+cat > src/controllers/auth.controller.js <<'AUTHCEOF'
+const bcrypt = require('bcryptjs');
+const database = require('../utils/database');
+const logger = require('../utils/logger');
+
+class AuthController {
+  async login(req, res) {
+    try {
+      const { username, password } = req.body;
+      
+      const user = await database.get(
+        'SELECT * FROM users WHERE username = ?',
+        [username]
+      );
+
+      if (!user || !await bcrypt.compare(password, user.password)) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      req.session.user = {
+        id: user.id,
+        username: user.username,
+        role: user.role
+      };
+
+      // Log activity
+      await database.run(
+        'INSERT INTO activity_logs (user_id, action, ip_address) VALUES (?, ?, ?)',
+        [user.id, 'login', req.ip]
+      );
+
+      res.json({
+        success: true,
+        user: {
+          username: user.username,
+          role: user.role
+        }
+      });
+    } catch (error) {
+      logger.error('Login error:', error);
+      res.status(500).json({ error: 'Login failed' });
+    }
+  }
+
+  async logout(req, res) {
+    if (req.session.user) {
+      await database.run(
+        'INSERT INTO activity_logs (user_id, action, ip_address) VALUES (?, ?, ?)',
+        [req.session.user.id, 'logout', req.ip]
+      );
+    }
+    req.session.destroy();
+    res.json({ success: true });
+  }
+
+  async check(req, res) {
+    res.json({
+      authenticated: !!(req.session && req.session.user),
+      user: req.session?.user || null
+    });
+  }
+}
+
+module.exports = new AuthController();
+AUTHCEOF
+
+########################################
+# === src/controllers/dashboard.controller.js ===
+########################################
+cat > src/controllers/dashboard.controller.js <<'DASHEOF'
+const os = require('os');
+const { execSync } = require('child_process');
+const logger = require('../utils/logger');
+
+class DashboardController {
+  async getStats(req, res) {
+    try {
+      const totalMem = os.totalmem();
+      const freeMem = os.freemem();
+      const cpus = os.cpus();
+      
+      // Get disk usage
+      let disk = { total: 0, used: 0, free: 0 };
+      try {
+        const df = execSync("df -B1 / | tail -1").toString().split(/\s+/);
+        disk = { total: parseInt(df[1]), used: parseInt(df[2]), free: parseInt(df[3]) };
+      } catch (e) {}
+
+      res.json({
+        hostname: os.hostname(),
+        ip: req.socket.localAddress || 'Unknown',
+        uptime: os.uptime(),
+        cpu: {
+          model: cpus[0]?.model || 'Unknown',
+          cores: cpus.length,
+          load: os.loadavg()
+        },
+        memory: {
+          total: totalMem,
+          used: totalMem - freeMem,
+          free: freeMem
+        },
+        disk,
+        nodeVersion: process.version
+      });
+    } catch (error) {
+      logger.error('Dashboard stats error:', error);
+      res.status(500).json({ error: 'Failed to get stats' });
+    }
+  }
+
+  async getServices(req, res) {
+    const services = ['lsws', 'mariadb', 'redis-server', 'litepanel'];
+    const statuses = [];
+
+    for (const service of services) {
+      try {
+        execSync(`systemctl is-active ${service}`, { stdio: 'pipe' });
+        statuses.push({ name: service, active: true });
+      } catch (e) {
+        statuses.push({ name: service, active: false });
+      }
+    }
+
+    res.json(statuses);
+  }
+
+  async controlService(req, res) {
+    try {
+      const { name, action } = req.params;
+      const allowedServices = ['lsws', 'mariadb', 'redis-server'];
+      const allowedActions = ['start', 'stop', 'restart'];
+
+      if (!allowedServices.includes(name) || !allowedActions.includes(action)) {
+        return res.status(400).json({ error: 'Invalid service or action' });
+      }
+
+      execSync(`systemctl ${action} ${name}`, { timeout: 15000 });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+}
+
+module.exports = new DashboardController();
+DASHEOF
+
+########################################
+# === src/controllers/domain.controller.js ===
+########################################
+cat > src/controllers/domain.controller.js <<'DOMEOF'
+const fs = require('fs').promises;
+const path = require('path');
+const { execSync } = require('child_process');
+const database = require('../utils/database');
+const logger = require('../utils/logger');
+
+const OLS_CONF = '/usr/local/lsws/conf/httpd_config.conf';
+const OLS_VHOST_CONF_DIR = '/usr/local/lsws/conf/vhosts';
+const OLS_VHOST_DIR = '/usr/local/lsws/vhosts';
+
+class DomainController {
+  async list(req, res) {
+    try {
+      const domains = await database.all('SELECT * FROM domains ORDER BY name');
+      res.json(domains);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to list domains' });
+    }
+  }
+
+  async create(req, res) {
+    try {
+      const { domain, cloudflareAccountId } = req.body;
+      
+      if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
+        return res.status(400).json({ error: 'Invalid domain name' });
+      }
+
+      // Create vhost files
+      const docRoot = await this.createVhostFiles(domain);
+      
+      // Add to OpenLiteSpeed config
+      await this.addDomainToOLS(domain);
+      
+      // Save to database
+      await database.run(
+        'INSERT INTO domains (name, cloudflare_account_id, doc_root) VALUES (?, ?, ?)',
+        [domain, cloudflareAccountId || null, docRoot]
+      );
+
+      // Restart OpenLiteSpeed
+      execSync('systemctl restart lsws', { timeout: 15000 });
+
+      res.json({ success: true, domain, docRoot });
+    } catch (error) {
+      logger.error('Domain creation error:', error);
+      res.status(500).json({ error: 'Failed to create domain' });
+    }
+  }
+
+  async remove(req, res) {
+    try {
+      const { name } = req.params;
+      
+      // Remove from OpenLiteSpeed
+      await this.removeDomainFromOLS(name);
+      
+      // Remove files
+      await fs.rm(path.join(OLS_VHOST_CONF_DIR, name), { recursive: true, force: true });
+      await fs.rm(path.join(OLS_VHOST_DIR, name), { recursive: true, force: true });
+      
+      // Remove from database
+      await database.run('DELETE FROM domains WHERE name = ?', [name]);
+      
+      // Restart OpenLiteSpeed
+      execSync('systemctl restart lsws', { timeout: 15000 });
+
+      res.json({ success: true });
+    } catch (error) {
+      logger.error('Domain removal error:', error);
+      res.status(500).json({ error: 'Failed to remove domain' });
+    }
+  }
+
+  async createVhostFiles(domain) {
+    const confDir = path.join(OLS_VHOST_CONF_DIR, domain);
+    const docRoot = path.join(OLS_VHOST_DIR, domain, 'html');
+    const logDir = path.join(OLS_VHOST_DIR, domain, 'logs');
+
+    await fs.mkdir(confDir, { recursive: true });
+    await fs.mkdir(docRoot, { recursive: true });
+    await fs.mkdir(logDir, { recursive: true });
+
+    const vhConf = `docRoot                   $VH_ROOT/html
+vhDomain                  ${domain}
+vhAliases                 www.${domain}
 enableGzip                1
-enableBr                  1
 
 index {
   useServer               0
   indexFiles              index.php, index.html
   autoIndex               0
-}
-
-errorlog \$VH_ROOT/logs/error.log {
-  useServer               0
-  logLevel                ERROR
-  rollingSize             10M
-}
-
-accesslog \$VH_ROOT/logs/access.log {
-  useServer               0
-  rollingSize             10M
 }
 
 scripthandler {
@@ -378,678 +797,1864 @@ scripthandler {
 rewrite {
   enable                  1
   autoLoadHtaccess        1
-  
-  rules                   <<<END_rules
-RewriteCond %{HTTPS} !on
-RewriteCond %{HTTP:X-Forwarded-Proto} !https
-RewriteRule ^(.*)$ https://%{HTTP_HOST}/\$1 [R=301,L]
-END_rules
-}
+}`;
 
-accessControl {
-  allow                   *
-}
+    await fs.writeFile(path.join(confDir, 'vhconf.conf'), vhConf);
+    await fs.writeFile(path.join(docRoot, 'index.html'), 
+      `<!DOCTYPE html><html><head><title>${domain}</title></head>
+      <body><h1>Welcome to ${domain}</h1><p>Powered by LitePanel Pro</p></body></html>`);
 
-context / {
-  location                \$DOC_ROOT/
-  allowBrowse             1
-  
-  rewrite {
+    execSync(`chown -R nobody:nogroup ${path.join(OLS_VHOST_DIR, domain)}`);
     
+    return docRoot;
   }
-  addDefaultCharset       off
-  
-  phpIniOverride {
+
+  async addDomainToOLS(domain) {
+    let config = await fs.readFile(OLS_CONF, 'utf8');
     
+    // Add virtualhost
+    config += `\nvirtualhost ${domain} {
+  vhRoot                  ${OLS_VHOST_DIR}/${domain}
+  configFile              ${OLS_VHOST_CONF_DIR}/${domain}/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              1
+}\n`;
+
+    // Add listener mapping
+    const listenerRegex = /(listener\s+HTTP\s*\{[\s\S]*?)(})/;
+    if (listenerRegex.test(config)) {
+      config = config.replace(listenerRegex,
+        `$1  map                     ${domain} ${domain}, www.${domain}\n$2`);
+    }
+
+    await fs.writeFile(OLS_CONF, config);
+  }
+
+  async removeDomainFromOLS(domain) {
+    let config = await fs.readFile(OLS_CONF, 'utf8');
+    
+    // Remove virtualhost
+    const vhRegex = new RegExp(`\\n?virtualhost\\s+${domain}\\s*\\{[\\s\\S]*?\\}`, 'g');
+    config = config.replace(vhRegex, '');
+    
+    // Remove mapping
+    const mapRegex = new RegExp(`^\\s*map\\s+${domain}\\s+.*$`, 'gm');
+    config = config.replace(mapRegex, '');
+    
+    await fs.writeFile(OLS_CONF, config);
   }
 }
-EOF
-    
-    # Add to main config
-    add_to_main_config $domain
-    
-    log_success "Vhost created"
-}
 
-# Add vhost to main OpenLiteSpeed config
-add_to_main_config() {
-    local domain=$1
-    local config="$CONFIG_PATH/httpd_config.conf"
-    
-    # Check if already exists
-    if grep -q "virtualhost $domain" "$config"; then
-        return
-    fi
-    
-    # Backup config
-    cp $config ${config}.backup.$(date +%Y%m%d_%H%M%S)
-    
-    # Add virtualhost before listener
-    sed -i "/^listener.*Default/i\\
-virtualhost $domain {\\
-  vhRoot                  $VHOST_PATH/$domain/\\
-  configFile              \$SERVER_ROOT/conf/vhosts/$domain/vhconf.conf\\
-  allowSymbolLink         1\\
-  enableScript            1\\
-  restrained              0\\
-}\\
-" "$config"
-    
-    # Add mapping in HTTP listener
-    sed -i "/listener.*Default.*{/,/^}/ {
-        /address.*:80/ {
-            a\\  map                     $domain $domain
-            a\\  map                     www.$domain $domain
-        }
-    }" "$config"
-    
-    # Add mapping in HTTPS listener  
-    sed -i "/listener.*SSL.*{/,/^}/ {
-        /address.*:443/ {
-            a\\  map                     $domain $domain
-            a\\  map                     www.$domain $domain
-        }
-    }" "$config"
-}
+module.exports = new DomainController();
+DOMEOF
 
-# Issue SSL certificate
-issue_ssl() {
-    local domain=$1
-    
-    log_info "Issuing SSL certificate..."
-    
-    # Load zone ID
-    source $CONFIG_PATH/cloudflare-zones.conf
-    zone_var="CF_Zone_ID_${domain//./_}"
-    export CF_Zone_ID="${!zone_var}"
-    
-    # Issue certificate
-    /root/.acme.sh/acme.sh --issue \
-        --dns dns_cf \
-        -d $domain \
-        -d www.$domain \
-        --keylength 2048 \
-        --force
-    
-    if [ $? -eq 0 ]; then
-        # Install certificate
-        mkdir -p $CONFIG_PATH/vhosts/$domain/ssl
-        /root/.acme.sh/acme.sh --install-cert \
-            -d $domain \
-            --cert-file $CONFIG_PATH/vhosts/$domain/ssl/cert.pem \
-            --key-file $CONFIG_PATH/vhosts/$domain/ssl/key.pem \
-            --fullchain-file $CONFIG_PATH/vhosts/$domain/ssl/fullchain.pem \
-            --reloadcmd "systemctl restart lsws"
-        
-        # Configure SSL in vhost
-        configure_ssl_vhost $domain
-        
-        log_success "SSL certificate issued and installed"
-    else
-        log_error "Failed to issue SSL certificate"
-    fi
-}
+########################################
+# === src/controllers/file.controller.js ===
+########################################
+cat > src/controllers/file.controller.js <<'FILECEOF'
+const fs = require('fs').promises;
+const fsSync = require('fs');
+const path = require('path');
+const multer = require('multer');
+const archiver = require('archiver');
+const unzipper = require('unzipper');
+const mime = require('mime-types');
+const logger = require('../utils/logger');
 
-# Configure SSL in vhost
-configure_ssl_vhost() {
-    local domain=$1
-    local vhconf="$CONFIG_PATH/vhosts/$domain/vhconf.conf"
-    
-    # Check if SSL already configured
-    if grep -q "vhssl" $vhconf; then
-        return
-    fi
-    
-    # Add SSL configuration
-    cat >> $vhconf << EOF
+const upload = multer({ 
+  dest: '/tmp/uploads/',
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+});
 
-vhssl {
-  keyFile                 $CONFIG_PATH/vhosts/$domain/ssl/key.pem
-  certFile                $CONFIG_PATH/vhosts/$domain/ssl/fullchain.pem
-  certChain               1
-  sslProtocol             all -SSLv3 -TLSv1 -TLSv1.1
-  enableECDHE             1
-  renegProtection         1
-  sslSessionCache         1
-  sslSessionTickets       1
-  enableSpdy              15
-  enableQuic              1
-}
-EOF
-}
+class FileController {
+  constructor() {
+    this.allowedPaths = ['/usr/local/lsws/vhosts', '/opt/litepanel-pro'];
+    this.maxFileSize = 50 * 1024 * 1024; // 50MB for editing
+  }
 
-# Remove domain
-remove_domain() {
-    local domain=$1
-    
-    log_info "Removing $domain..."
-    
-    # Remove from OpenLiteSpeed config
-    sed -i "/^virtualhost $domain {/,/^}/d" $CONFIG_PATH/httpd_config.conf
-    sed -i "/map.*$domain/d" $CONFIG_PATH/httpd_config.conf
-    
-    # Backup before removing
-    if [ -d "$VHOST_PATH/$domain" ]; then
-        tar -czf /root/${domain}_backup_$(date +%Y%m%d_%H%M%S).tar.gz -C $VHOST_PATH $domain
-        rm -rf $VHOST_PATH/$domain
-    fi
-    
-    rm -rf $CONFIG_PATH/vhosts/$domain
-    
-    log_success "Domain removed (backup saved in /root/)"
-}
+  validatePath(requestedPath) {
+    const resolvedPath = path.resolve(requestedPath);
+    const isAllowed = this.allowedPaths.some(allowed => 
+      resolvedPath.startsWith(allowed)
+    );
 
-# Main execution
-case $ACTION in
-    "add")
-        if [ -z "$DOMAIN" ]; then
-            echo "Usage: $0 domain.com [add|remove|ssl|check]"
-            exit 1
-        fi
-        
-        echo -e "${GREEN}=== ADDING DOMAIN: $DOMAIN ===${NC}\n"
-        
-        # Add to Cloudflare
-        add_to_cloudflare $DOMAIN
-        
-        # Create vhost
-        create_vhost $DOMAIN
-        
-        # Reload OpenLiteSpeed
-        systemctl restart lsws
-        
-        # Wait for DNS propagation
-        echo -e "\n${YELLOW}Waiting for DNS propagation (30 seconds)...${NC}"
-        sleep 30
-        
-        # Issue SSL
-        issue_ssl $DOMAIN
-        
-        # Final reload
-        systemctl restart lsws
-        
-        echo -e "\n${GREEN}✓ Domain $DOMAIN successfully configured!${NC}"
-        echo -e "${GREEN}✓ Website URL: https://$DOMAIN${NC}"
-        echo -e "\n${YELLOW}Note: Full DNS propagation may take up to 24 hours${NC}"
-        ;;
-        
-    "remove")
-        if [ -z "$DOMAIN" ]; then
-            echo "Usage: $0 domain.com remove"
-            exit 1
-        fi
-        
-        read -p "Are you sure you want to remove $DOMAIN? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            remove_domain $DOMAIN
-            systemctl restart lsws
-        fi
-        ;;
-        
-    "ssl")
-        if [ -z "$DOMAIN" ]; then
-            echo "Usage: $0 domain.com ssl"
-            exit 1
-        fi
-        
-        issue_ssl $DOMAIN
-        systemctl restart lsws
-        ;;
-        
-    "check")
-        if [ -z "$DOMAIN" ]; then
-            echo "Usage: $0 domain.com check"
-            exit 1
-        fi
-        
-        echo "Checking $DOMAIN..."
-        
-        # Check DNS
-        echo -n "DNS Resolution: "
-        if host $DOMAIN > /dev/null 2>&1; then
-            echo -e "${GREEN}✓ OK${NC} ($(dig +short $DOMAIN | head -1))"
-        else
-            echo -e "${RED}✗ Failed${NC}"
-        fi
-        
-        # Check vhost
-        echo -n "Vhost Configuration: "
-        if [ -d "$VHOST_PATH/$DOMAIN" ]; then
-            echo -e "${GREEN}✓ OK${NC}"
-        else
-            echo -e "${RED}✗ Not found${NC}"
-        fi
-        
-        # Check SSL
-        echo -n "SSL Certificate: "
-        if [ -f "$CONFIG_PATH/vhosts/$DOMAIN/ssl/fullchain.pem" ]; then
-            echo -e "${GREEN}✓ OK${NC}"
-        else
-            echo -e "${RED}✗ Not found${NC}"
-        fi
-        
-        # Check HTTP response
-        echo -n "HTTP Response: "
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $DOMAIN" http://localhost/ 2>/dev/null)
-        if [ "$HTTP_CODE" = "301" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "200" ]; then
-            echo -e "${GREEN}✓ OK ($HTTP_CODE)${NC}"
-        else
-            echo -e "${RED}✗ Error ($HTTP_CODE)${NC}"
-        fi
-        
-        # Check HTTPS response
-        echo -n "HTTPS Response: "
-        HTTPS_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" https://$DOMAIN/ 2>/dev/null)
-        if [ "$HTTPS_CODE" = "200" ]; then
-            echo -e "${GREEN}✓ OK ($HTTPS_CODE)${NC}"
-        else
-            echo -e "${YELLOW}⚠ Check needed ($HTTPS_CODE)${NC}"
-        fi
-        ;;
-        
-    *)
-        echo "Usage: $0 domain.com [add|remove|ssl|check]"
-        echo
-        echo "Commands:"
-        echo "  add     - Add new domain with Cloudflare + SSL"
-        echo "  remove  - Remove domain and its files"
-        echo "  ssl     - Issue/Renew SSL certificate"
-        echo "  check   - Check domain configuration"
-        exit 1
-        ;;
-esac
-SCRIPT
-
-    chmod +x $LSWS_PATH/bin/manage-domain.sh
-    
-    # Create helper scripts
-    ln -sf $LSWS_PATH/bin/manage-domain.sh /usr/local/bin/domain
-    
-    log "Domain management scripts created"
-}
-
-# Update LitePanel with domain management
-update_litepanel() {
-    if [ "$EXISTING_PANEL" = false ]; then
-        log "Installing LitePanel..."
-        
-        # Create panel directories
-        mkdir -p $PANEL_PATH/{html,logs,conf,sessions}
-        
-        # Your existing panel installation code here...
-        # (keeping all existing panel files)
-    fi
-    
-    log "Adding domain management to LitePanel..."
-    
-    # Add domain management page
-    cat > $PANEL_PATH/html/domains.php << 'PHP'
-<?php
-session_start();
-if (!isset($_SESSION['admin'])) {
-    header('Location: login.php');
-    exit;
-}
-
-$message = '';
-$messageType = '';
-
-// Handle form submission
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $action = $_POST['action'];
-    $domain = $_POST['domain'];
-    
-    // Validate domain
-    if (!preg_match('/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i', $domain)) {
-        $message = "Invalid domain format";
-        $messageType = 'error';
-    } else {
-        // Execute domain management
-        $cmd = "/usr/local/lsws/bin/manage-domain.sh " . escapeshellarg($domain) . " " . escapeshellarg($action) . " 2>&1";
-        $output = shell_exec($cmd);
-        
-        $message = $output;
-        $messageType = (strpos($output, 'successfully') !== false) ? 'success' : 'info';
+    if (!isAllowed) {
+      throw new Error('Access denied');
     }
-}
 
-// Get existing domains
-$domains = [];
-$vhostPath = '/usr/local/lsws/vhosts/';
-if (is_dir($vhostPath)) {
-    $dirs = scandir($vhostPath);
-    foreach ($dirs as $dir) {
-        if ($dir != '.' && $dir != '..' && $dir != 'panel' && is_dir($vhostPath . $dir)) {
-            $domains[] = $dir;
+    return resolvedPath;
+  }
+
+  async list(req, res) {
+    try {
+      const targetPath = this.validatePath(req.query.path || '/usr/local/lsws/vhosts');
+      const stats = await fs.stat(targetPath);
+
+      if (!stats.isDirectory()) {
+        // Return file content for editing
+        if (stats.size > this.maxFileSize) {
+          return res.json({ path: targetPath, size: stats.size, tooLarge: true });
         }
+
+        const content = await fs.readFile(targetPath, 'utf8');
+        return res.json({ path: targetPath, content, size: stats.size });
+      }
+
+      // List directory contents
+      const items = await fs.readdir(targetPath);
+      const detailed = [];
+
+      for (const item of items) {
+        try {
+          const itemPath = path.join(targetPath, item);
+          const itemStats = await fs.stat(itemPath);
+          
+          detailed.push({
+            name: item,
+            path: itemPath,
+            size: itemStats.size,
+            isDirectory: itemStats.isDirectory(),
+            isFile: itemStats.isFile(),
+            mimeType: itemStats.isDirectory() ? 'directory' : mime.lookup(itemPath) || 'application/octet-stream',
+            modified: itemStats.mtime,
+            permissions: '0' + (itemStats.mode & parseInt('777', 8)).toString(8)
+          });
+        } catch (e) {
+          detailed.push({
+            name: item,
+            path: path.join(targetPath, item),
+            error: true
+          });
+        }
+      }
+
+      res.json({ path: targetPath, items: detailed });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
+  }
+
+  async download(req, res) {
+    try {
+      const targetPath = this.validatePath(req.query.path);
+      const stats = await fs.stat(targetPath);
+
+      if (stats.isDirectory()) {
+        return res.status(400).json({ error: 'Cannot download directory' });
+      }
+
+      res.download(targetPath);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  upload = [
+    upload.single('file'),
+    async (req, res) => {
+      try {
+        const targetDir = this.validatePath(req.body.path || '/tmp');
+        const targetPath = path.join(targetDir, req.file.originalname);
+        
+        await fs.rename(req.file.path, targetPath);
+        res.json({ success: true, path: targetPath });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    }
+  ];
+
+  async create(req, res) {
+    try {
+      const { path: filePath, type, content } = req.body;
+      const targetPath = this.validatePath(filePath);
+
+      if (type === 'directory') {
+        await fs.mkdir(targetPath, { recursive: true });
+      } else {
+        await fs.writeFile(targetPath, content || '');
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async update(req, res) {
+    try {
+      const { path: filePath, content } = req.body;
+      const targetPath = this.validatePath(filePath);
+      
+      await fs.writeFile(targetPath, content);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async remove(req, res) {
+    try {
+      const targetPath = this.validatePath(req.query.path);
+      
+      if (targetPath === '/' || this.allowedPaths.includes(targetPath)) {
+        return res.status(400).json({ error: 'Cannot delete root directories' });
+      }
+
+      await fs.rm(targetPath, { recursive: true, force: true });
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async rename(req, res) {
+    try {
+      const { oldPath, newPath } = req.body;
+      const validOldPath = this.validatePath(oldPath);
+      const validNewPath = this.validatePath(newPath);
+      
+      await fs.rename(validOldPath, validNewPath);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async extract(req, res) {
+    try {
+      const { archivePath, destPath } = req.body;
+      const validArchivePath = this.validatePath(archivePath);
+      const validDestPath = this.validatePath(destPath);
+
+      await fs.mkdir(validDestPath, { recursive: true });
+
+      await new Promise((resolve, reject) => {
+        fsSync.createReadStream(validArchivePath)
+          .pipe(unzipper.Extract({ path: validDestPath }))
+          .on('close', resolve)
+          .on('error', reject);
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  async compress(req, res) {
+    try {
+      const { files, destPath, format = 'zip' } = req.body;
+      const validDestPath = this.validatePath(destPath);
+      
+      const output = fsSync.createWriteStream(validDestPath);
+      const archive = archiver(format, { zlib: { level: 9 } });
+
+      archive.pipe(output);
+
+      for (const file of files) {
+        const validPath = this.validatePath(file);
+        const stats = await fs.stat(validPath);
+        
+        if (stats.isDirectory()) {
+          archive.directory(validPath, path.basename(validPath));
+        } else {
+          archive.file(validPath, { name: path.basename(validPath) });
+        }
+      }
+
+      await archive.finalize();
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 }
 
-// Check Cloudflare status
-$cfConfigured = file_exists('/usr/local/lsws/conf/cloudflare-api.conf');
-?>
+module.exports = new FileController();
+FILECEOF
+
+########################################
+# === src/controllers/cloudflare.controller.js ===
+########################################
+cat > src/controllers/cloudflare.controller.js <<'CFEOF'
+const axios = require('axios');
+const database = require('../utils/database');
+const logger = require('../utils/logger');
+
+class CloudflareController {
+  constructor() {
+    this.baseURL = 'https://api.cloudflare.com/client/v4';
+  }
+
+  async makeRequest(method, endpoint, data, apiToken) {
+    try {
+      const response = await axios({
+        method,
+        url: `${this.baseURL}${endpoint}`,
+        headers: {
+          'Authorization': `Bearer ${apiToken}`,
+          'Content-Type': 'application/json'
+        },
+        data
+      });
+      return response.data;
+    } catch (error) {
+      logger.error('Cloudflare API error:', error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  async listAccounts(req, res) {
+    try {
+      const accounts = await database.all(
+        'SELECT id, name, email, is_active, created_at FROM cloudflare_accounts'
+      );
+      res.json(accounts);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to list accounts' });
+    }
+  }
+
+  async addAccount(req, res) {
+    try {
+      const { name, email, apiToken } = req.body;
+      
+      // Verify token
+      const verification = await this.makeRequest('GET', '/user/tokens/verify', null, apiToken);
+      
+      if (!verification.success) {
+        return res.status(400).json({ error: 'Invalid API token' });
+      }
+
+      // Save account
+      const result = await database.run(
+        'INSERT INTO cloudflare_accounts (name, email, api_token) VALUES (?, ?, ?)',
+        [name, email, apiToken] // In production, encrypt the token
+      );
+
+      res.json({ success: true, id: result.id });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to add account' });
+    }
+  }
+
+  async removeAccount(req, res) {
+    try {
+      await database.run('DELETE FROM cloudflare_accounts WHERE id = ?', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to remove account' });
+    }
+  }
+
+  async listZones(req, res) {
+    try {
+      const account = await database.get(
+        'SELECT api_token FROM cloudflare_accounts WHERE id = ?',
+        [req.params.accountId]
+      );
+
+      if (!account) {
+        return res.status(404).json({ error: 'Account not found' });
+      }
+
+      const result = await this.makeRequest('GET', '/zones', null, account.api_token);
+      res.json(result.result || []);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to list zones' });
+    }
+  }
+
+  async createZone(req, res) {
+    try {
+      const { name } = req.body;
+      const account = await database.get(
+        'SELECT api_token, account_id FROM cloudflare_accounts WHERE id = ?',
+        [req.params.accountId]
+      );
+
+      const result = await this.makeRequest('POST', '/zones', {
+        name,
+        account: { id: account.account_id },
+        jump_start: true
+      }, account.api_token);
+
+      if (result.success) {
+        // Update domain in database
+        await database.run(
+          'UPDATE domains SET cloudflare_zone_id = ? WHERE name = ?',
+          [result.result.id, name]
+        );
+      }
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to create zone' });
+    }
+  }
+
+  async listDNS(req, res) {
+    try {
+      const zone = await database.get(
+        'SELECT cf.api_token FROM domains d ' +
+        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
+        'WHERE d.cloudflare_zone_id = ?',
+        [req.params.zoneId]
+      );
+
+      const result = await this.makeRequest(
+        'GET', 
+        `/zones/${req.params.zoneId}/dns_records`, 
+        null, 
+        zone.api_token
+      );
+
+      res.json(result.result || []);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to list DNS records' });
+    }
+  }
+
+  async createDNS(req, res) {
+    try {
+      const { type, name, content, ttl = 1, proxied = false } = req.body;
+      const zone = await database.get(
+        'SELECT cf.api_token FROM domains d ' +
+        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
+        'WHERE d.cloudflare_zone_id = ?',
+        [req.params.zoneId]
+      );
+
+      const result = await this.makeRequest(
+        'POST',
+        `/zones/${req.params.zoneId}/dns_records`,
+        { type, name, content, ttl, proxied },
+        zone.api_token
+      );
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to create DNS record' });
+    }
+  }
+
+  async updateDNS(req, res) {
+    try {
+      const { type, name, content, ttl, proxied } = req.body;
+      const zone = await database.get(
+        'SELECT cf.api_token FROM domains d ' +
+        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
+        'WHERE d.cloudflare_zone_id = ?',
+        [req.params.zoneId]
+      );
+
+      const result = await this.makeRequest(
+        'PUT',
+        `/zones/${req.params.zoneId}/dns_records/${req.params.recordId}`,
+        { type, name, content, ttl, proxied },
+        zone.api_token
+      );
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to update DNS record' });
+    }
+  }
+
+  async deleteDNS(req, res) {
+    try {
+      const zone = await database.get(
+        'SELECT cf.api_token FROM domains d ' +
+        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
+        'WHERE d.cloudflare_zone_id = ?',
+        [req.params.zoneId]
+      );
+
+      const result = await this.makeRequest(
+        'DELETE',
+        `/zones/${req.params.zoneId}/dns_records/${req.params.recordId}`,
+        null,
+        zone.api_token
+      );
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to delete DNS record' });
+    }
+  }
+
+  async purgeCache(req, res) {
+    try {
+      const { files } = req.body;
+      const zone = await database.get(
+        'SELECT cf.api_token FROM domains d ' +
+        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
+        'WHERE d.cloudflare_zone_id = ?',
+        [req.params.zoneId]
+      );
+
+      const data = files ? { files } : { purge_everything: true };
+      
+      const result = await this.makeRequest(
+        'POST',
+        `/zones/${req.params.zoneId}/purge_cache`,
+        data,
+        zone.api_token
+      );
+
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to purge cache' });
+    }
+  }
+}
+
+module.exports = new CloudflareController();
+CFEOF
+
+########################################
+# === public/index.html ===
+########################################
+cat > public/index.html <<'HTMLEOF'
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Domain Manager - LitePanel</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        body { background-color: #f8f9fa; }
-        .main-container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-        .card { box-shadow: 0 0 20px rgba(0,0,0,0.1); border: none; margin-bottom: 20px; }
-        .card-header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
-        .domain-item { transition: all 0.3s; }
-        .domain-item:hover { transform: translateX(5px); background-color: #f8f9fa; }
-        .status-active { color: #28a745; }
-        .status-inactive { color: #dc3545; }
-        .terminal-output { 
-            background: #1e1e1e; 
-            color: #00ff00; 
-            padding: 15px; 
-            border-radius: 5px; 
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            white-space: pre-wrap;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        .add-domain-btn {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border: none;
-            padding: 10px 30px;
-            color: white;
-            border-radius: 25px;
-            transition: all 0.3s;
-        }
-        .add-domain-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>LitePanel Pro</title>
+<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
-    <?php include 'header.php'; ?>
-    
-    <div class="main-container">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h1><i class="fas fa-globe"></i> Domain Manager</h1>
-            <?php if (!$cfConfigured): ?>
-            <div class="alert alert-warning mb-0">
-                <i class="fas fa-exclamation-triangle"></i> Cloudflare not configured. 
-                <a href="settings.php#cloudflare">Configure now</a>
-            </div>
-            <?php endif; ?>
-        </div>
-
-        <?php if ($message): ?>
-        <div class="alert alert-<?php echo $messageType == 'error' ? 'danger' : ($messageType == 'success' ? 'success' : 'info'); ?> alert-dismissible fade show">
-            <?php if ($messageType == 'info'): ?>
-            <div class="terminal-output"><?php echo htmlspecialchars($message); ?></div>
-            <?php else: ?>
-            <?php echo nl2br(htmlspecialchars($message)); ?>
-            <?php endif; ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-        <?php endif; ?>
-
-        <!-- Add Domain Card -->
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="fas fa-plus-circle"></i> Add New Domain</h5>
-            </div>
-            <div class="card-body">
-                <form method="POST" class="row g-3">
-                    <input type="hidden" name="action" value="add">
-                    
-                    <div class="col-md-8">
-                        <label class="form-label">Domain Name</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="fas fa-globe"></i></span>
-                            <input type="text" name="domain" class="form-control" 
-                                   placeholder="example.com" required 
-                                   pattern="^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$"
-                                   title="Enter a valid domain name">
-                        </div>
-                        <small class="text-muted">Enter domain without http:// or www.</small>
-                    </div>
-                    
-                    <div class="col-md-4">
-                        <label class="form-label">&nbsp;</label>
-                        <button type="submit" class="btn add-domain-btn w-100" <?php echo !$cfConfigured ? 'disabled' : ''; ?>>
-                            <i class="fas fa-plus"></i> Add Domain
-                        </button>
-                    </div>
-                </form>
-                
-                <?php if ($cfConfigured): ?>
-                <div class="mt-3">
-                    <div class="badge bg-success"><i class="fas fa-check"></i> Automatic Cloudflare DNS</div>
-                    <div class="badge bg-success"><i class="fas fa-check"></i> Free SSL Certificate</div>
-                    <div class="badge bg-success"><i class="fas fa-check"></i> Auto-renewal</div>
-                </div>
-                <?php endif; ?>
-            </div>
-        </div>
-
-        <!-- Existing Domains -->
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="fas fa-list"></i> Your Domains (<?php echo count($domains); ?>)</h5>
-            </div>
-            <div class="card-body">
-                <?php if (empty($domains)): ?>
-                <p class="text-muted text-center py-4">No domains configured yet. Add your first domain above!</p>
-                <?php else: ?>
-                <div class="table-responsive">
-                    <table class="table table-hover">
-                        <thead>
-                            <tr>
-                                <th>Domain</th>
-                                <th>SSL Status</th>
-                                <th>Files</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach ($domains as $domain): ?>
-                            <?php 
-                            $sslExists = file_exists("/usr/local/lsws/conf/vhosts/$domain/ssl/fullchain.pem");
-                            $fileCount = count(glob("/usr/local/lsws/vhosts/$domain/html/*"));
-                            ?>
-                            <tr class="domain-item">
-                                <td>
-                                    <strong><?php echo htmlspecialchars($domain); ?></strong><br>
-                                    <small class="text-muted">
-                                        <a href="https://<?php echo $domain; ?>" target="_blank">
-                                            <i class="fas fa-external-link-alt"></i> Visit
-                                        </a>
-                                    </small>
-                                </td>
-                                <td>
-                                    <?php if ($sslExists): ?>
-                                    <span class="status-active"><i class="fas fa-lock"></i> Secured</span>
-                                    <?php else: ?>
-                                    <span class="status-inactive"><i class="fas fa-lock-open"></i> No SSL</span>
-                                    <?php endif; ?>
-                                </td>
-                                <td>
-                                    <span class="badge bg-secondary"><?php echo $fileCount; ?> files</span>
-                                </td>
-                                <td>
-                                    <div class="btn-group btn-group-sm">
-                                        <a href="filemanager.php?domain=<?php echo $domain; ?>" 
-                                           class="btn btn-outline-primary" title="File Manager">
-                                            <i class="fas fa-folder"></i>
-                                        </a>
-                                        
-                                        <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="action" value="ssl">
-                                            <input type="hidden" name="domain" value="<?php echo $domain; ?>">
-                                            <button type="submit" class="btn btn-outline-success" 
-                                                    title="<?php echo $sslExists ? 'Renew' : 'Install'; ?> SSL">
-                                                <i class="fas fa-certificate"></i>
-                                            </button>
-                                        </form>
-                                        
-                                        <form method="POST" style="display: inline;" 
-                                              onsubmit="return confirm('Remove <?php echo $domain; ?>? This will backup files to /root/');">
-                                            <input type="hidden" name="action" value="remove">
-                                            <input type="hidden" name="domain" value="<?php echo $domain; ?>">
-                                            <button type="submit" class="btn btn-outline-danger" title="Remove">
-                                                <i class="fas fa-trash"></i>
-                                            </button>
-                                        </form>
-                                        
-                                        <form method="POST" style="display: inline;">
-                                            <input type="hidden" name="action" value="check">
-                                            <input type="hidden" name="domain" value="<?php echo $domain; ?>">
-                                            <button type="submit" class="btn btn-outline-info" title="Check Status">
-                                                <i class="fas fa-heartbeat"></i>
-                                            </button>
-                                        </form>
-                                    </div>
-                                </td>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-                <?php endif; ?>
-            </div>
-        </div>
-
-        <!-- How it works -->
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0"><i class="fas fa-info-circle"></i> How Automatic Domain Setup Works</h5>
-            </div>
-            <div class="card-body">
-                <div class="row">
-                    <div class="col-md-3 text-center mb-3">
-                        <div class="rounded-circle bg-primary text-white d-inline-flex align-items-center justify-content-center" 
-                             style="width: 60px; height: 60px;">
-                            <i class="fas fa-plus fa-lg"></i>
-                        </div>
-                        <h6 class="mt-2">1. Add Domain</h6>
-                        <small class="text-muted">Enter your domain name</small>
-                    </div>
-                    
-                    <div class="col-md-3 text-center mb-3">
-                        <div class="rounded-circle bg-warning text-white d-inline-flex align-items-center justify-content-center" 
-                             style="width: 60px; height: 60px;">
-                            <i class="fas fa-cloud fa-lg"></i>
-                        </div>
-                        <h6 class="mt-2">2. Cloudflare Setup</h6>
-                        <small class="text-muted">Automatic DNS configuration</small>
-                    </div>
-                    
-                    <div class="col-md-3 text-center mb-3">
-                        <div class="rounded-circle bg-success text-white d-inline-flex align-items-center justify-content-center" 
-                             style="width: 60px; height: 60px;">
-                            <i class="fas fa-lock fa-lg"></i>
-                        </div>
-                        <h6 class="mt-2">3. SSL Certificate</h6>
-                        <small class="text-muted">Free Let's Encrypt SSL</small>
-                    </div>
-                    
-                    <div class="col-md-3 text-center mb-3">
-                        <div class="rounded-circle bg-info text-white d-inline-flex align-items-center justify-content-center" 
-                             style="width: 60px; height: 60px;">
-                            <i class="fas fa-rocket fa-lg"></i>
-                        </div>
-                        <h6 class="mt-2">4. Go Live!</h6>
-                        <small class="text-muted">Your site is ready</small>
-                    </div>
-                </div>
-                
-                <div class="alert alert-info mt-3">
-                    <i class="fas fa-lightbulb"></i> <strong>Pro Tip:</strong> 
-                    After adding a domain, update your domain's nameservers at your registrar to Cloudflare's nameservers shown in the output.
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+<div id="app">
+  <div class="loading-screen">
+    <i class="fas fa-server fa-3x"></i>
+    <h1>LitePanel Pro</h1>
+    <div class="spinner"></div>
+    <p>Loading...</p>
+  </div>
+</div>
+<script src="/js/app.js"></script>
 </body>
 </html>
-PHP
+HTMLEOF
 
-    # Update header.php to include domains link
-    if [ -f "$PANEL_PATH/html/header.php" ]; then
-        # Add domains link if not exists
-        if ! grep -q "domains.php" $PANEL_PATH/html/header.php; then
-            sed -i '/<a.*href="index.php"/a\
-                    <a class="nav-link" href="domains.php"><i class="fas fa-globe"></i> Domains</a>' \
-                $PANEL_PATH/html/header.php
-        fi
-    fi
-    
-    log "LitePanel updated with domain management"
+########################################
+# === public/css/style.css ===
+########################################
+cat > public/css/style.css <<'CSSEOF'
+:root {
+  --primary: #4f8cff;
+  --primary-dark: #3a7ae0;
+  --secondary: #6c757d;
+  --success: #28a745;
+  --danger: #dc3545;
+  --warning: #ffc107;
+  --bg-primary: #0f1117;
+  --bg-secondary: #1a1d23;
+  --bg-tertiary: #2a2d35;
+  --text-primary: #e0e0e0;
+  --text-secondary: #8a8d93;
+  --border: #3a3d45;
 }
 
-# Main installation flow
-main() {
-    clear
-    echo -e "${BLUE}"
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║     OpenLiteSpeed + LitePanel + Cloudflare Installer    ║"
-    echo "║                     Version $INSTALLER_VERSION                       ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-    
-    # Pre-flight checks
-    check_root
-    detect_existing
-    backup_existing
-    
-    # Installation
-    install_dependencies
-    install_openlitespeed
-    setup_cloudflare
-    create_domain_scripts
-    update_litepanel
-    
-    # Post-installation
-    log "Cleaning up..."
-    apt-get clean
-    
-    # Final configuration
-    systemctl restart lsws
-    
-    # Summary
-    clear
-    echo -e "${GREEN}"
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║            Installation Completed Successfully!           ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-    
-    echo -e "\n${YELLOW}Access Details:${NC}"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "LitePanel: https://$(curl -s ifconfig.me):2087"
-    
-    if [ -f "/root/.litepanel" ]; then
-        cat /root/.litepanel
-    fi
-    
-    echo -e "\nOpenLiteSpeed WebAdmin: https://$(curl -s ifconfig.me):7080"
-    
-    if [ -f "/root/ols-credentials.txt" ]; then
-        cat /root/ols-credentials.txt
-    fi
-    
-    echo -e "\n${YELLOW}Quick Commands:${NC}"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "Add domain    : domain example.com add"
-    echo "Remove domain : domain example.com remove"
-    echo "Renew SSL     : domain example.com ssl"
-    echo "Check domain  : domain example.com check"
-    
-    echo -e "\n${GREEN}Installation log saved to: $INSTALLER_LOG${NC}"
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
 }
 
-# Run installation
-main "$@"
+.loading-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  text-align: center;
+}
+
+.loading-screen i {
+  color: var(--primary);
+  margin-bottom: 20px;
+}
+
+.spinner {
+  width: 50px;
+  height: 50px;
+  border: 3px solid var(--bg-secondary);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  margin: 20px auto;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.login-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+}
+
+.login-box {
+  background: var(--bg-tertiary);
+  padding: 40px;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  width: 100%;
+  max-width: 400px;
+}
+
+.login-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.login-header i {
+  font-size: 3rem;
+  color: var(--primary);
+  margin-bottom: 15px;
+}
+
+.login-header h1 {
+  font-size: 1.75rem;
+  margin-bottom: 5px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.form-control {
+  width: 100%;
+  padding: 10px 15px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+  transition: all 0.3s;
+}
+
+.form-control:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.1);
+}
+
+.btn {
+  display: inline-block;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s;
+  text-decoration: none;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: var(--primary-dark);
+  transform: translateY(-1px);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.error-message {
+  background: rgba(220, 53, 69, 0.1);
+  color: var(--danger);
+  padding: 10px;
+  border-radius: 6px;
+  margin-top: 15px;
+  text-align: center;
+  font-size: 0.875rem;
+}
+
+.app-container {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 250px;
+  background: var(--bg-secondary);
+  position: fixed;
+  height: 100vh;
+  overflow-y: auto;
+  transition: transform 0.3s;
+}
+
+.sidebar-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+
+.sidebar-header h1 {
+  font-size: 1.5rem;
+  color: var(--primary);
+}
+
+.sidebar-nav {
+  padding: 20px 0;
+}
+
+.nav-item {
+  display: block;
+  padding: 12px 20px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: all 0.3s;
+  border-left: 3px solid transparent;
+}
+
+.nav-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--primary);
+}
+
+.nav-item.active {
+  background: var(--bg-tertiary);
+  color: var(--primary);
+  border-left-color: var(--primary);
+}
+
+.nav-item i {
+  margin-right: 10px;
+  width: 20px;
+  text-align: center;
+}
+
+.main-content {
+  flex: 1;
+  margin-left: 250px;
+  background: var(--bg-primary);
+}
+
+.header {
+  background: var(--bg-secondary);
+  padding: 15px 30px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.page-content {
+  padding: 30px;
+}
+
+.card {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.card-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+  margin-bottom: 30px;
+}
+
+.stat-card {
+  background: var(--bg-tertiary);
+  padding: 20px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--primary);
+  margin: 10px 0;
+}
+
+.stat-label {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th,
+.table td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.table th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.badge-success {
+  background: rgba(40, 167, 69, 0.2);
+  color: var(--success);
+}
+
+.badge-danger {
+  background: rgba(220, 53, 69, 0.2);
+  color: var(--danger);
+}
+
+.file-manager {
+  height: calc(100vh - 200px);
+}
+
+.file-breadcrumb {
+  padding: 15px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+
+.file-list {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.file-item:hover {
+  background: var(--bg-secondary);
+}
+
+.file-icon {
+  margin-right: 15px;
+  font-size: 1.25rem;
+}
+
+.file-name {
+  flex: 1;
+}
+
+.file-size {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  margin-right: 20px;
+}
+
+.file-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.mobile-toggle {
+  display: none;
+  position: fixed;
+  top: 15px;
+  left: 15px;
+  z-index: 100;
+  background: var(--bg-tertiary);
+  border: none;
+  color: var(--text-primary);
+  padding: 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+@media (max-width: 768px) {
+  .sidebar {
+    transform: translateX(-100%);
+  }
+  
+  .sidebar.open {
+    transform: translateX(0);
+  }
+  
+  .main-content {
+    margin-left: 0;
+  }
+  
+  .mobile-toggle {
+    display: block;
+  }
+  
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 30px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  margin-bottom: 20px;
+}
+
+.modal-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.progress {
+  height: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 5px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s;
+}
+
+.progress-bar.danger {
+  background: var(--danger);
+}
+
+.progress-bar.warning {
+  background: var(--warning);
+}
+
+.cloudflare-section {
+  margin-top: 30px;
+}
+
+.dns-record {
+  background: var(--bg-secondary);
+  padding: 15px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.dns-info {
+  flex: 1;
+}
+
+.dns-type {
+  display: inline-block;
+  padding: 4px 8px;
+  background: var(--primary);
+  color: white;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+.dns-name {
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+.dns-content {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.875rem;
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: white;
+}
+
+.btn-success {
+  background: var(--success);
+  color: white;
+}
+
+.btn-warning {
+  background: var(--warning);
+  color: #212529;
+}
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--bg-tertiary);
+  padding: 15px 20px;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 1000;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.toast.success {
+  border-left: 4px solid var(--success);
+}
+
+.toast.error {
+  border-left: 4px solid var(--danger);
+}
+
+.terminal {
+  background: #000;
+  color: #0f0;
+  font-family: 'Courier New', monospace;
+  padding: 20px;
+  border-radius: 6px;
+  height: 400px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.terminal-input {
+  display: flex;
+  margin-top: 10px;
+}
+
+.terminal-input input {
+  flex: 1;
+  background: #000;
+  border: 1px solid #333;
+  color: #0f0;
+  padding: 10px;
+  font-family: 'Courier New', monospace;
+  border-radius: 4px 0 0 4px;
+}
+
+.terminal-input button {
+  border-radius: 0 4px 4px 0;
+}
+CSSEOF
+
+########################################
+# === public/js/app.js ===
+########################################
+cat > public/js/app.js <<'JSEOF'
+class LitePanelPro {
+  constructor() {
+    this.currentPage = 'dashboard';
+    this.user = null;
+    this.init();
+  }
+
+  async init() {
+    const auth = await this.api('/api/auth/check');
+    if (auth.authenticated) {
+      this.user = auth.user;
+      this.renderApp();
+      this.navigate('dashboard');
+    } else {
+      this.renderLogin();
+    }
+  }
+
+  async api(url, options = {}) {
+    const defaults = {
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin'
+    };
+
+    if (options.body && !(options.body instanceof FormData)) {
+      options.body = JSON.stringify(options.body);
+    }
+
+    const response = await fetch(url, { ...defaults, ...options });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Request failed');
+    }
+
+    return data;
+  }
+
+  renderLogin() {
+    document.getElementById('app').innerHTML = `
+      <div class="login-container">
+        <div class="login-box">
+          <div class="login-header">
+            <i class="fas fa-server"></i>
+            <h1>LitePanel Pro</h1>
+            <p>Enterprise Management Panel</p>
+          </div>
+          <form id="loginForm">
+            <div class="form-group">
+              <label>Username</label>
+              <input type="text" class="form-control" id="username" required>
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" class="form-control" id="password" required>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">
+              <i class="fas fa-sign-in-alt"></i> Login
+            </button>
+            <div id="loginError"></div>
+          </form>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('loginForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.login();
+    });
+  }
+
+  async login() {
+    try {
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+
+      const result = await this.api('/api/auth/login', {
+        method: 'POST',
+        body: { username, password }
+      });
+
+      if (result.success) {
+        this.user = result.user;
+        this.renderApp();
+        this.navigate('dashboard');
+      }
+    } catch (error) {
+      document.getElementById('loginError').innerHTML = 
+        `<div class="error-message">${error.message}</div>`;
+    }
+  }
+
+  renderApp() {
+    document.getElementById('app').innerHTML = `
+      <div class="app-container">
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-header">
+            <h1><i class="fas fa-server"></i> LitePanel Pro</h1>
+          </div>
+          <nav class="sidebar-nav">
+            <a href="#" class="nav-item" data-page="dashboard">
+              <i class="fas fa-tachometer-alt"></i> Dashboard
+            </a>
+            <a href="#" class="nav-item" data-page="domains">
+              <i class="fas fa-globe"></i> Domains
+            </a>
+            <a href="#" class="nav-item" data-page="cloudflare">
+              <i class="fab fa-cloudflare"></i> Cloudflare
+            </a>
+            <a href="#" class="nav-item" data-page="files">
+              <i class="fas fa-folder"></i> File Manager
+            </a>
+            <a href="#" class="nav-item" data-page="databases">
+              <i class="fas fa-database"></i> Databases
+            </a>
+            <a href="#" class="nav-item" data-page="services">
+              <i class="fas fa-cogs"></i> Services
+            </a>
+            <a href="#" class="nav-item" data-page="terminal">
+              <i class="fas fa-terminal"></i> Terminal
+            </a>
+            <a href="#" class="nav-item" data-page="settings">
+              <i class="fas fa-cog"></i> Settings
+            </a>
+            <a href="#" class="nav-item" onclick="app.logout()">
+              <i class="fas fa-sign-out-alt"></i> Logout
+            </a>
+          </nav>
+        </aside>
+        
+        <main class="main-content">
+          <header class="header">
+            <button class="mobile-toggle" onclick="app.toggleSidebar()">
+              <i class="fas fa-bars"></i>
+            </button>
+            <h2 id="pageTitle">Dashboard</h2>
+            <div class="header-user">
+              <i class="fas fa-user-circle"></i> ${this.user.username}
+            </div>
+          </header>
+          
+          <div class="page-content" id="content">
+            <!-- Dynamic content -->
+          </div>
+        </main>
+      </div>
+    `;
+
+    // Setup navigation
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.addEventListener('click', (e) => {
+        e.preventDefault();
+        const page = item.dataset.page;
+        if (page) this.navigate(page);
+      });
+    });
+  }
+
+  navigate(page) {
+    this.currentPage = page;
+    
+    // Update active nav
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.classList.toggle('active', item.dataset.page === page);
+    });
+
+    // Update title
+    const titles = {
+      dashboard: 'Dashboard',
+      domains: 'Domain Management',
+      cloudflare: 'Cloudflare Integration',
+      files: 'File Manager',
+      databases: 'Databases',
+      services: 'Services',
+      terminal: 'Terminal',
+      settings: 'Settings'
+    };
+    
+    document.getElementById('pageTitle').textContent = titles[page] || page;
+
+    // Load page content
+    this[`render${page.charAt(0).toUpperCase() + page.slice(1)}`]();
+  }
+
+  async renderDashboard() {
+    try {
+      const stats = await this.api('/api/dashboard');
+      const services = await this.api('/api/services');
+
+      const memoryPercent = Math.round((stats.memory.used / stats.memory.total) * 100);
+      const diskPercent = Math.round((stats.disk.used / stats.disk.total) * 100);
+
+      document.getElementById('content').innerHTML = `
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">Hostname</div>
+            <div class="stat-value">${stats.hostname}</div>
+            <div class="stat-label">${stats.ip}</div>
+          </div>
+          
+          <div class="stat-card">
+            <div class="stat-label">CPU</div>
+            <div class="stat-value">${stats.cpu.cores} Cores</div>
+            <div class="stat-label">Load: ${stats.cpu.load.map(l => l.toFixed(2)).join(', ')}</div>
+          </div>
+          
+          <div class="stat-card">
+            <div class="stat-label">Memory</div>
+            <div class="stat-value">${memoryPercent}%</div>
+            <div class="progress">
+              <div class="progress-bar ${memoryPercent > 80 ? 'danger' : ''}" 
+                   style="width: ${memoryPercent}%"></div>
+            </div>
+            <div class="stat-label">${this.formatBytes(stats.memory.used)} / ${this.formatBytes(stats.memory.total)}</div>
+          </div>
+          
+          <div class="stat-card">
+            <div class="stat-label">Disk</div>
+            <div class="stat-value">${diskPercent}%</div>
+            <div class="progress">
+              <div class="progress-bar ${diskPercent > 80 ? 'danger' : ''}" 
+                   style="width: ${diskPercent}%"></div>
+            </div>
+            <div class="stat-label">${this.formatBytes(stats.disk.used)} / ${this.formatBytes(stats.disk.total)}</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Services Status</h3>
+          </div>
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${services.map(service => `
+                <tr>
+                  <td>${service.name}</td>
+                  <td>
+                    <span class="badge ${service.active ? 'badge-success' : 'badge-danger'}">
+                      ${service.active ? 'Running' : 'Stopped'}
+                    </span>
+                  </td>
+                  <td>
+                    <button class="btn btn-sm btn-success" 
+                            onclick="app.controlService('${service.name}', 'start')">
+                      Start
+                    </button>
+                    <button class="btn btn-sm btn-danger" 
+                            onclick="app.controlService('${service.name}', 'stop')">
+                      Stop
+                    </button>
+                    <button class="btn btn-sm btn-warning" 
+                            onclick="app.controlService('${service.name}', 'restart')">
+                      Restart
+                    </button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  async renderCloudflare() {
+    try {
+      const accounts = await this.api('/api/cloudflare/accounts');
+      
+      document.getElementById('content').innerHTML = `
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Cloudflare Accounts</h3>
+            <button class="btn btn-primary" onclick="app.showAddCloudflareAccount()">
+              <i class="fas fa-plus"></i> Add Account
+            </button>
+          </div>
+          
+          ${accounts.length === 0 ? `
+            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+              <i class="fas fa-cloud fa-3x" style="opacity: 0.5; margin-bottom: 20px;"></i>
+              <p>No Cloudflare accounts configured yet.</p>
+              <p>Add an account to start managing your domains with Cloudflare.</p>
+            </div>
+          ` : `
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${accounts.map(account => `
+                  <tr>
+                    <td>${account.name}</td>
+                    <td>${account.email}</td>
+                    <td>
+                      <span class="badge ${account.is_active ? 'badge-success' : 'badge-danger'}">
+                        ${account.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    <td>
+                      <button class="btn btn-sm btn-primary" 
+                              onclick="app.viewCloudflareZones(${account.id})">
+                        View Zones
+                      </button>
+                      <button class="btn btn-sm btn-danger" 
+                              onclick="app.deleteCloudflareAccount(${account.id})">
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `}
+        </div>
+
+        <div id="cloudflareZones"></div>
+      `;
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  showAddCloudflareAccount() {
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 class="modal-title">Add Cloudflare Account</h3>
+        </div>
+        <form id="addCloudflareForm">
+          <div class="form-group">
+            <label>Account Name</label>
+            <input type="text" class="form-control" name="name" required>
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" class="form-control" name="email" required>
+          </div>
+          <div class="form-group">
+            <label>API Token</label>
+            <input type="password" class="form-control" name="apiToken" required>
+            <small style="color: var(--text-secondary);">
+              Get your API token from 
+              <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank">
+                Cloudflare Dashboard
+              </a>
+            </small>
+          </div>
+          <div style="display: flex; gap: 10px;">
+            <button type="submit" class="btn btn-primary">Add Account</button>
+            <button type="button" class="btn" onclick="this.closest('.modal').remove()">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    document.getElementById('addCloudflareForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      
+      try {
+        await this.api('/api/cloudflare/accounts', {
+          method: 'POST',
+          body: {
+            name: formData.get('name'),
+            email: formData.get('email'),
+            apiToken: formData.get('apiToken')
+          }
+        });
+
+        modal.remove();
+        this.showToast('Cloudflare account added successfully', 'success');
+        this.renderCloudflare();
+      } catch (error) {
+        this.showError(error);
+      }
+    });
+  }
+
+  async renderFiles() {
+    // File manager implementation
+    document.getElementById('content').innerHTML = `
+      <div class="file-manager">
+        <div class="file-breadcrumb" id="breadcrumb">
+          <i class="fas fa-home"></i> /
+        </div>
+        
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <button class="btn btn-primary btn-sm" onclick="app.uploadFile()">
+                <i class="fas fa-upload"></i> Upload
+              </button>
+              <button class="btn btn-success btn-sm" onclick="app.createFolder()">
+                <i class="fas fa-folder-plus"></i> New Folder
+              </button>
+              <button class="btn btn-warning btn-sm" onclick="app.createFile()">
+                <i class="fas fa-file-plus"></i> New File
+              </button>
+            </div>
+          </div>
+          
+          <div class="file-list" id="fileList">
+            Loading...
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.loadFiles('/usr/local/lsws/vhosts');
+  }
+
+  async loadFiles(path) {
+    try {
+      const result = await this.api(`/api/files?path=${encodeURIComponent(path)}`);
+      
+      if (result.content !== undefined) {
+        // Show file editor
+        this.showFileEditor(result);
+      } else {
+        // Show directory listing
+        const fileList = document.getElementById('fileList');
+        fileList.innerHTML = result.items.map(item => `
+          <div class="file-item" onclick="app.openFile('${item.path}')">
+            <i class="file-icon fas ${item.isDirectory ? 'fa-folder' : 'fa-file'}"></i>
+            <span class="file-name">${item.name}</span>
+            <span class="file-size">${item.isDirectory ? '' : this.formatBytes(item.size)}</span>
+            <div class="file-actions">
+              ${!item.isDirectory ? `
+                <button class="btn btn-sm" onclick="event.stopPropagation(); app.downloadFile('${item.path}')">
+                  <i class="fas fa-download"></i>
+                </button>
+              ` : ''}
+              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); app.deleteFile('${item.path}')">
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>
+          </div>
+        `).join('');
+
+        // Update breadcrumb
+        const parts = path.split('/').filter(Boolean);
+        document.getElementById('breadcrumb').innerHTML = 
+          '<i class="fas fa-home"></i> / ' + 
+          parts.map((part, i) => 
+            `<a href="#" onclick="app.loadFiles('/${parts.slice(0, i + 1).join('/')}')">${part}</a>`
+          ).join(' / ');
+      }
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  async openFile(path) {
+    this.loadFiles(path);
+  }
+
+  async controlService(name, action) {
+    try {
+      await this.api(`/api/services/${name}/${action}`, { method: 'POST' });
+      this.showToast(`Service ${name} ${action}ed successfully`, 'success');
+      this.renderDashboard();
+    } catch (error) {
+      this.showError(error);
+    }
+  }
+
+  toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+  }
+
+  async logout() {
+    await this.api('/api/auth/logout', { method: 'POST' });
+    this.user = null;
+    this.renderLogin();
+  }
+
+  formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  showToast(message, type = 'info') {
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+      <i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'}"></i>
+      ${message}
+    `;
+
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
+  }
+
+  showError(error) {
+    this.showToast(error.message || 'An error occurred', 'error');
+  }
+
+  // Stub methods for other pages
+  renderDomains() {
+    document.getElementById('content').innerHTML = '<p>Domains page - Coming soon</p>';
+  }
+
+  renderDatabases() {
+    document.getElementById('content').innerHTML = '<p>Databases page - Coming soon</p>';
+  }
+
+  renderServices() {
+    document.getElementById('content').innerHTML = '<p>Services page - Coming soon</p>';
+  }
+
+  renderTerminal() {
+    document.getElementById('content').innerHTML = '<p>Terminal page - Coming soon</p>';
+  }
+
+  renderSettings() {
+    document.getElementById('content').innerHTML = '<p>Settings page - Coming soon</p>';
+  }
+}
+
+// Initialize app
+const app = new LitePanelPro();
+JSEOF
+
+########################################
+step "Step 8/12: Configure OpenLiteSpeed"
+########################################
+# Configure PHP handler for OpenLiteSpeed
+cat > /usr/local/lsws/conf/vhosts/Example/vhconf.conf <<'VHEOF'
+docRoot                   $VH_ROOT/html
+vhDomain                  *
+enableGzip                1
+
+index {
+  useServer               0
+  indexFiles              index.php, index.html
+}
+
+scripthandler {
+  add                     lsapi:lsphp81 php
+}
+
+rewrite {
+  enable                  1
+  autoLoadHtaccess        1
+}
+VHEOF
+
+# Set admin password for OpenLiteSpeed
+/usr/local/lsws/admin/misc/admpass.sh <<EOF
+admin
+${ADMIN_PASS}
+${ADMIN_PASS}
+EOF
+
+systemctl restart lsws
+log "OpenLiteSpeed configured"
+
+########################################
+step "Step 9/12: Install phpMyAdmin"
+########################################
+cd /tmp
+wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz -O pma.tar.gz 2>/dev/null
+tar xzf pma.tar.gz
+mkdir -p /usr/local/lsws/Example/html/phpmyadmin
+cp -rf phpMyAdmin-*/* /usr/local/lsws/Example/html/phpmyadmin/
+rm -rf phpMyAdmin-* pma.tar.gz
+
+cat > /usr/local/lsws/Example/html/phpmyadmin/config.inc.php <<PMAEOF
+<?php
+\$cfg['blowfish_secret'] = '$(openssl rand -hex 32)';
+\$i = 0;
+\$i++;
+\$cfg['Servers'][\$i]['host'] = 'localhost';
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+PMAEOF
+
+chown -R nobody:nogroup /usr/local/lsws/Example/html/phpmyadmin
+log "phpMyAdmin installed"
+
+########################################
+step "Step 10/12: Setup Services & Firewall"
+########################################
+# Create systemd service
+cat > /etc/systemd/system/litepanel.service <<SVCEOF
+[Unit]
+Description=LitePanel Pro - Enterprise Management Panel
+After=network.target mariadb.service redis-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=${PANEL_DIR}
+ExecStart=/usr/bin/node app.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+systemctl daemon-reload
+systemctl enable litepanel
+systemctl start litepanel
+
+# Configure firewall
+ufw --force reset > /dev/null 2>&1
+ufw default deny incoming > /dev/null 2>&1
+ufw default allow outgoing > /dev/null 2>&1
+ufw allow 22/tcp > /dev/null 2>&1
+ufw allow 80/tcp > /dev/null 2>&1
+ufw allow 443/tcp > /dev/null 2>&1
+ufw allow ${PANEL_PORT}/tcp > /dev/null 2>&1
+ufw allow 7080/tcp > /dev/null 2>&1
+ufw --force enable > /dev/null 2>&1
+
+log "Services configured and started"
+
+########################################
+step "Step 11/12: Install Fail2ban"
+########################################
+apt-get install -y -qq fail2ban > /dev/null 2>&1
+systemctl enable fail2ban > /dev/null 2>&1
+systemctl start fail2ban
+log "Fail2ban installed"
+
+########################################
+step "Step 12/12: Save Credentials"
+########################################
+mkdir -p /etc/litepanel
+cat > /etc/litepanel/credentials.txt <<CREDEOF
+==============================================
+       LITEPANEL PRO INSTALLATION INFO
+==============================================
+Installation Date: $(date)
+Server IP: ${SERVER_IP}
+
+==============================================
+              ACCESS URLS
+==============================================
+LitePanel Pro:    http://${SERVER_IP}:${PANEL_PORT}
+OpenLiteSpeed:    http://${SERVER_IP}:7080
+phpMyAdmin:       http://${SERVER_IP}:8088/phpmyadmin/
+
+==============================================
+              CREDENTIALS
+==============================================
+LitePanel Login:  ${ADMIN_USER} / ${ADMIN_PASS}
+OLS Admin Login:  admin / ${ADMIN_PASS}
+MariaDB Root:     ${DB_ROOT_PASS}
+
+==============================================
+              IMPORTANT NOTES
+==============================================
+1. Change all default passwords after login
+2. Configure SSL certificates for production
+3. Setup Cloudflare integration in panel
+4. Regular backups recommended
+
+==============================================
+              USEFUL COMMANDS
+==============================================
+Restart Panel:    systemctl restart litepanel
+View Logs:        journalctl -u litepanel -f
+Panel Status:     systemctl status litepanel
+
+==============================================
+CREDEOF
+
+chmod 600 /etc/litepanel/credentials.txt
+cp /etc/litepanel/credentials.txt /root/litepanel_credentials.txt
+
+########################################
+# FINAL SUMMARY
+########################################
+clear
+echo -e "${M}"
+cat << "EOF"
+   __    _ __       ____                  __   ____           
+  / /   (_) /____  / __ \____ _____  ___  / /  / __ \_________ 
+ / /   / / __/ _ \/ /_/ / __ `/ __ \/ _ \/ /  / /_/ / ___/ __ \
+/ /___/ / /_/  __/ ____/ /_/ / / / /  __/ /  / ____/ /  / /_/ /
+/_____/_/\__/\___/_/    \__,_/_/ /_/\___/_/  /_/   /_/   \____/ 
+                                                                 
+EOF
+echo -e "${N}"
+echo -e "${G}╔═══════════════════════════════════════════════════════╗${N}"
+echo -e "${G}║          INSTALLATION COMPLETED SUCCESSFULLY!          ║${N}"
+echo -e "${G}╚═══════════════════════════════════════════════════════╝${N}"
+echo
+echo -e "${C}Access Information:${N}"
+echo -e "LitePanel Pro:  ${Y}http://${SERVER_IP}:${PANEL_PORT}${N}"
+echo -e "Username:       ${Y}${ADMIN_USER}${N}"
+echo -e "Password:       ${Y}${ADMIN_PASS}${N}"
+echo
+echo -e "${C}Additional Services:${N}"
+echo -e "OpenLiteSpeed:  ${Y}http://${SERVER_IP}:7080${N} (admin / ${ADMIN_PASS})"
+echo -e "phpMyAdmin:     ${Y}http://${SERVER_IP}:8088/phpmyadmin/${N}"
+echo
+echo -e "${C}Credentials saved to:${N}"
+echo -e "  ${B}/etc/litepanel/credentials.txt${N}"
+echo -e "  ${B}/root/litepanel_credentials.txt${N}"
+echo
+echo -e "${G}Service Status:${N}"
+for svc in lsws mariadb redis-server litepanel; do
+  if systemctl is-active --quiet $svc; then
+    echo -e "  ${G}[✓]${N} $svc"
+  else
+    echo -e "  ${R}[✗]${N} $svc"
+  fi
+done
+echo
+echo -e "${Y}⚠️  IMPORTANT: Change all default passwords after first login!${N}"
+echo -e "${G}═══════════════════════════════════════════════════════${N}"

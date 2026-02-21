@@ -1,36 +1,32 @@
 #!/bin/bash
 ############################################
-# LitePanel Pro Installer v3.0
-# Complete All-in-One Installer
+# LitePanel Installer v2.1 (Production)
 # Fresh Ubuntu 22.04 LTS Only
-# With Advanced Cloudflare & File Manager
+# REVISED: Cloudflare Multi-Domain Management
 ############################################
 
 export DEBIAN_FRONTEND=noninteractive
 
 # === CONFIG ===
-PANEL_DIR="/opt/litepanel-pro"
+PANEL_DIR="/opt/litepanel"
 PANEL_PORT=3000
 ADMIN_USER="admin"
+# Generate stronger password
 ADMIN_PASS=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-16)
 DB_ROOT_PASS="LitePanel$(openssl rand -hex 8)"
-SESSION_SECRET=$(openssl rand -hex 32)
-ENCRYPTION_KEY=$(openssl rand -hex 16)
-JWT_SECRET=$(openssl rand -hex 32)
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 [ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
 
 # === COLORS ===
-G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; Y='\033[1;33m'; C='\033[0;36m'; M='\033[0;35m'; N='\033[0m'
+G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; Y='\033[1;33m'; C='\033[0;36m'; N='\033[0m'
 step() { echo -e "\n${C}━━━ $1 ━━━${N}"; }
 log()  { echo -e "${G}[✓]${N} $1"; }
 err()  { echo -e "${R}[✗]${N} $1"; }
 warn() { echo -e "${Y}[!]${N} $1"; }
-info() { echo -e "${B}[i]${N} $1"; }
 
 # === CHECK ROOT ===
-[ "$EUID" -ne 0 ] && err "Run as root!" && exit 1
+[ "$EUID" -ne 0 ] && echo "Run as root!" && exit 1
 
 # === CHECK OS ===
 if [ -f /etc/os-release ]; then
@@ -49,739 +45,2158 @@ while fuser /var/lib/dpkg/lock-frontend > /dev/null 2>&1; do
 done
 
 clear
-echo -e "${M}"
-cat << "EOF"
-   __    _ __       ____                  __   ____           
-  / /   (_) /____  / __ \____ _____  ___  / /  / __ \_________ 
- / /   / / __/ _ \/ /_/ / __ `/ __ \/ _ \/ /  / /_/ / ___/ __ \
-/ /___/ / /_/  __/ ____/ /_/ / / / /  __/ /  / ____/ /  / /_/ /
-/_____/_/\__/\___/_/    \__,_/_/ /_/\___/_/  /_/   /_/   \____/ 
-                                                                 
-EOF
+echo -e "${C}"
+echo "  ╔══════════════════════════════════╗"
+echo "  ║   LitePanel Installer v2.1       ║"
+echo "  ║   Ubuntu 22.04 LTS              ║"
+echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
-echo -e "${C}Version 3.0 - Enterprise Multi-Domain Cloudflare Panel${N}"
-echo -e "${C}══════════════════════════════════════════════════════${N}\n"
 sleep 2
 
 ########################################
-step "Step 1/12: Update System"
+step "Step 1/10: Update System"
 ########################################
 apt-get update -y -qq > /dev/null 2>&1
 apt-get upgrade -y -qq > /dev/null 2>&1
 log "System updated"
 
 ########################################
-step "Step 2/12: Install Dependencies"
+step "Step 2/10: Install Dependencies"
 ########################################
 apt-get install -y -qq curl wget gnupg2 software-properties-common \
   apt-transport-https ca-certificates lsb-release ufw git unzip \
-  openssl jq build-essential redis-server sqlite3 > /dev/null 2>&1
+  openssl jq > /dev/null 2>&1
 log "Dependencies installed"
 
 ########################################
-step "Step 3/12: Install OpenLiteSpeed + PHP 8.1"
+step "Step 3/10: Install OpenLiteSpeed + PHP 8.1"
 ########################################
-wget -O - https://repo.litespeed.sh 2>/dev/null | bash > /dev/null 2>&1
-apt-get update -y -qq > /dev/null 2>&1
-apt-get install -y openlitespeed > /dev/null 2>&1
 
-if [ ! -d "/usr/local/lsws" ]; then
-  err "OpenLiteSpeed installation failed!"
+CODENAME=$(lsb_release -sc 2>/dev/null || echo "jammy")
+REPO_ADDED=0
+
+# ============================================
+# METHOD 1: Official LiteSpeed repo script
+# ============================================
+log "Adding LiteSpeed repository (Method 1: official script)..."
+wget -qO /tmp/ls_repo.sh https://repo.litespeed.sh 2>/dev/null
+if [ -f /tmp/ls_repo.sh ] && [ -s /tmp/ls_repo.sh ]; then
+  bash /tmp/ls_repo.sh > /dev/null 2>&1
+  rm -f /tmp/ls_repo.sh
+  apt-get update -y -qq > /dev/null 2>&1
+fi
+
+if apt-cache show openlitespeed > /dev/null 2>&1; then
+  REPO_ADDED=1
+  log "LiteSpeed repository added (Method 1)"
+fi
+
+# ============================================
+# METHOD 2: Manual GPG with signed-by
+# ============================================
+if [ "$REPO_ADDED" -eq 0 ]; then
+  warn "Method 1 failed, trying Method 2 (manual GPG)..."
+  
+  wget -qO /tmp/lst_repo.gpg https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null
+  wget -qO /tmp/lst_debian_repo.gpg https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>/dev/null
+  
+  if [ -f /tmp/lst_repo.gpg ] && [ -s /tmp/lst_repo.gpg ]; then
+    # Try dearmor first, fallback to direct copy
+    gpg --dearmor < /tmp/lst_repo.gpg > /usr/share/keyrings/lst-debian.gpg 2>/dev/null
+    if [ ! -s /usr/share/keyrings/lst-debian.gpg ]; then
+      cp /tmp/lst_repo.gpg /usr/share/keyrings/lst-debian.gpg 2>/dev/null
+    fi
+    
+    echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
+      > /etc/apt/sources.list.d/lst_debian_repo.list
+  fi
+  rm -f /tmp/lst_repo.gpg /tmp/lst_debian_repo.gpg
+  apt-get update -y -qq > /dev/null 2>&1
+  
+  if apt-cache show openlitespeed > /dev/null 2>&1; then
+    REPO_ADDED=1
+    log "LiteSpeed repository added (Method 2)"
+  fi
+fi
+
+# ============================================
+# METHOD 3: Legacy apt-key (deprecated but works)
+# ============================================
+if [ "$REPO_ADDED" -eq 0 ]; then
+  warn "Method 2 failed, trying Method 3 (legacy apt-key)..."
+  
+  wget -qO - https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null | apt-key add - 2>/dev/null
+  wget -qO - https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>/dev/null | apt-key add - 2>/dev/null
+  
+  echo "deb http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
+    > /etc/apt/sources.list.d/lst_debian_repo.list
+  
+  apt-get update -y -qq > /dev/null 2>&1
+  
+  if apt-cache show openlitespeed > /dev/null 2>&1; then
+    REPO_ADDED=1
+    log "LiteSpeed repository added (Method 3)"
+  fi
+fi
+
+# ============================================
+# FINAL CHECK: Abort if repo failed
+# ============================================
+if [ "$REPO_ADDED" -eq 0 ]; then
+  err "═══════════════════════════════════════════════"
+  err "FATAL: Could not add LiteSpeed repository!"
+  err "Please run manually:"
+  err "  wget -O - https://repo.litespeed.sh | sudo bash"
+  err "  apt-get install openlitespeed lsphp81"
+  err "Then re-run this installer."
+  err "═══════════════════════════════════════════════"
   exit 1
 fi
 
-# Install PHP 8.1 and extensions
-apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl \
-  lsphp81-intl lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-json \
-  lsphp81-opcache lsphp81-sqlite3 > /dev/null 2>&1
+# ============================================
+# INSTALL OPENLITESPEED (show log on failure!)
+# ============================================
+log "Installing OpenLiteSpeed (this may take 1-2 minutes)..."
+apt-get install -y openlitespeed > /tmp/ols_install.log 2>&1
+OLS_RC=$?
 
-ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
-log "OpenLiteSpeed and PHP 8.1 installed"
+if [ $OLS_RC -ne 0 ] || [ ! -d "/usr/local/lsws" ]; then
+  err "═══════════════════════════════════════════════"
+  err "FATAL: OpenLiteSpeed installation failed!"
+  err "Exit code: $OLS_RC"
+  err "Last 30 lines of install log:"
+  echo ""
+  tail -30 /tmp/ols_install.log
+  echo ""
+  err "═══════════════════════════════════════════════"
+  exit 1
+fi
+log "OpenLiteSpeed installed"
+
+# ============================================
+# FIX: INSTALL PHP 8.1 WITH BETTER ERROR HANDLING
+# ============================================
+log "Installing PHP 8.1 with all required extensions..."
+
+# First, check what PHP packages are available
+log "Checking available PHP packages..."
+apt-cache search lsphp81 | grep -E "^lsphp81" > /tmp/available_php_packages.txt
+
+# Method 1: Try to install packages one by one
+PHP_INSTALLED=0
+
+# Essential package first
+log "Installing lsphp81 base package..."
+apt-get install -y lsphp81 > /tmp/php_base_install.log 2>&1
+if [ $? -eq 0 ] && [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
+  PHP_INSTALLED=1
+  log "Base PHP 8.1 installed successfully"
+else
+  warn "Failed to install lsphp81, checking alternatives..."
+  
+  # Try alternative package names
+  for pkg in "lsphp81" "lsphp8.1" "litespeed-php81"; do
+    if apt-cache show $pkg > /dev/null 2>&1; then
+      log "Trying to install $pkg..."
+      apt-get install -y $pkg > /tmp/php_alt_install.log 2>&1
+      if [ $? -eq 0 ]; then
+        PHP_INSTALLED=1
+        log "PHP installed via $pkg"
+        break
+      fi
+    fi
+  done
+fi
+
+if [ $PHP_INSTALLED -eq 0 ]; then
+  err "═══════════════════════════════════════════════"
+  err "FATAL: Could not install PHP 8.1!"
+  err "Available packages:"
+  cat /tmp/available_php_packages.txt
+  err ""
+  err "Last install attempt log:"
+  tail -20 /tmp/php_base_install.log
+  err "═══════════════════════════════════════════════"
+  err "Please install manually:"
+  err "  apt-get update"
+  err "  apt-get install lsphp81 lsphp81-mysql lsphp81-common"
+  err "═══════════════════════════════════════════════"
+  exit 1
+fi
+
+# Install PHP extensions with individual error handling
+log "Installing PHP extensions..."
+FAILED_EXTS=""
+
+# Core extensions for phpMyAdmin
+for ext in "common" "mysql" "mysqli" "curl" "json" "mbstring" "xml" "gd" "zip" "intl" "opcache"; do
+  PKG="lsphp81-$ext"
+  
+  # Skip if package doesn't exist
+  if ! apt-cache show $PKG > /dev/null 2>&1; then
+    # Try without hyphen
+    PKG="lsphp81$ext"
+    if ! apt-cache show $PKG > /dev/null 2>&1; then
+      warn "Package $ext not found, skipping..."
+      continue
+    fi
+  fi
+  
+  apt-get install -y $PKG > /tmp/php_ext_${ext}.log 2>&1
+  if [ $? -eq 0 ]; then
+    log "Installed $PKG"
+  else
+    warn "Failed to install $PKG"
+    FAILED_EXTS="$FAILED_EXTS $ext"
+  fi
+done
+
+# Check if critical extensions are missing
+CRITICAL_MISSING=""
+for ext in "mysql" "mysqli" "json"; do
+  if [[ "$FAILED_EXTS" == *"$ext"* ]]; then
+    CRITICAL_MISSING="$CRITICAL_MISSING $ext"
+  fi
+done
+
+if [ -n "$CRITICAL_MISSING" ]; then
+  warn "Critical PHP extensions missing:$CRITICAL_MISSING"
+  warn "phpMyAdmin may not work properly!"
+fi
+
+# Create symlink and verify
+if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
+  ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
+  PHP_VERSION=$(php -v 2>/dev/null | head -1 | awk '{print $2}')
+  log "PHP 8.1 installed ($PHP_VERSION)"
+  
+  # Show installed extensions
+  log "Installed PHP extensions:"
+  php -m 2>/dev/null | grep -E "(mysql|json|mbstring|gd|xml|curl)" | while read ext; do
+    echo "  - $ext"
+  done
+else
+  err "PHP binary not found at expected location"
+  exit 1
+fi
+
+# ============================================
+# CONFIGURE PHP FOR MYSQL SOCKET
+# ============================================
+log "Configuring PHP MySQL socket path..."
+
+# Find php.ini location
+PHP_INI_DIR="/usr/local/lsws/lsphp81/etc/php/8.1/litespeed"
+if [ ! -d "$PHP_INI_DIR" ]; then
+  # Try alternative paths
+  for dir in "/usr/local/lsws/lsphp81/etc/php/8.1/mods-available" \
+             "/usr/local/lsws/lsphp81/etc" \
+             "/usr/local/lsws/lsphp81/lib"; do
+    if [ -d "$dir" ]; then
+      PHP_INI_DIR="$dir"
+      break
+    fi
+  done
+fi
+
+# Create php.ini if it doesn't exist
+PHP_INI="$PHP_INI_DIR/php.ini"
+if [ ! -f "$PHP_INI" ]; then
+  log "Creating php.ini at $PHP_INI"
+  mkdir -p "$PHP_INI_DIR"
+  
+  # Copy from template if exists
+  if [ -f "/usr/local/lsws/lsphp81/etc/php.ini-production" ]; then
+    cp "/usr/local/lsws/lsphp81/etc/php.ini-production" "$PHP_INI"
+  else
+    # Create minimal php.ini
+    cat > "$PHP_INI" <<'PHPINI'
+[PHP]
+engine = On
+short_open_tag = Off
+precision = 14
+output_buffering = 4096
+implicit_flush = Off
+disable_functions =
+disable_classes =
+expose_php = Off
+max_execution_time = 30
+max_input_time = 60
+memory_limit = 256M
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+display_errors = Off
+log_errors = On
+post_max_size = 50M
+upload_max_filesize = 50M
+max_file_uploads = 20
+default_socket_timeout = 60
+
+[MySQLi]
+mysqli.default_socket = /var/run/mysqld/mysqld.sock
+mysqli.default_host = localhost
+mysqli.default_user =
+mysqli.default_pw =
+mysqli.reconnect = Off
+
+[MySQL]  
+mysql.default_socket = /var/run/mysqld/mysqld.sock
+
+[PDO_MYSQL]
+pdo_mysql.default_socket = /var/run/mysqld/mysqld.sock
+
+[Session]
+session.save_handler = files
+session.save_path = "/tmp"
+session.use_strict_mode = 0
+session.use_cookies = 1
+session.cookie_httponly = 1
+session.use_only_cookies = 1
+session.name = PHPSESSID
+session.cookie_lifetime = 0
+session.cookie_path = /
+session.serialize_handler = php
+session.gc_probability = 1
+session.gc_divisor = 1000
+session.gc_maxlifetime = 1440
+
+[Date]
+date.timezone = UTC
+PHPINI
+  fi
+fi
+
+# Update MySQL socket configuration
+if [ -f "$PHP_INI" ]; then
+  # Backup original
+  cp "$PHP_INI" "$PHP_INI.bak"
+  
+  # Configure MySQL socket paths
+  sed -i 's/^;\?mysqli.default_socket.*/mysqli.default_socket = \/var\/run\/mysqld\/mysqld.sock/' "$PHP_INI"
+  sed -i 's/^;\?mysql.default_socket.*/mysql.default_socket = \/var\/run\/mysqld\/mysqld.sock/' "$PHP_INI"
+  sed -i 's/^;\?pdo_mysql.default_socket.*/pdo_mysql.default_socket = \/var\/run\/mysqld\/mysqld.sock/' "$PHP_INI"
+  
+  # If lines don't exist, add them
+  grep -q "mysqli.default_socket" "$PHP_INI" || echo "mysqli.default_socket = /var/run/mysqld/mysqld.sock" >> "$PHP_INI"
+  grep -q "mysql.default_socket" "$PHP_INI" || echo "mysql.default_socket = /var/run/mysqld/mysqld.sock" >> "$PHP_INI"
+  grep -q "pdo_mysql.default_socket" "$PHP_INI" || echo "pdo_mysql.default_socket = /var/run/mysqld/mysqld.sock" >> "$PHP_INI"
+  
+  log "PHP MySQL socket configured"
+else
+  warn "PHP ini file not found at expected location"
+fi
+
+# Create additional ini file for LiteSpeed
+LSPHP_CONF="/usr/local/lsws/lsphp81/etc/php/8.1/mods-available/99-mysql-socket.ini"
+if [ ! -f "$LSPHP_CONF" ]; then
+  mkdir -p "$(dirname "$LSPHP_CONF")"
+  cat > "$LSPHP_CONF" <<'SOCKINI'
+; MySQL socket configuration for phpMyAdmin
+mysqli.default_socket = /var/run/mysqld/mysqld.sock
+mysql.default_socket = /var/run/mysqld/mysqld.sock  
+pdo_mysql.default_socket = /var/run/mysqld/mysqld.sock
+SOCKINI
+  log "Created additional MySQL socket configuration"
+fi
+
 
 ########################################
-step "Step 4/12: Install MariaDB"
+step "Step 4/10: Install MariaDB"
 ########################################
 apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
 systemctl enable mariadb > /dev/null 2>&1
 systemctl start mariadb
 
-# Secure MariaDB
-mysql -u root -e "
-  ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
-  DELETE FROM mysql.user WHERE User='';
-  DROP DATABASE IF EXISTS test;
-  FLUSH PRIVILEGES;
-" 2>/dev/null
+# Wait for MariaDB to be ready
+for i in $(seq 1 15); do
+  mysqladmin ping &>/dev/null && break
+  sleep 2
+done
 
-log "MariaDB installed & secured"
+if mysqladmin ping &>/dev/null; then
+  mysql -u root -e "
+    ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
+    DELETE FROM mysql.user WHERE User='';
+    DROP DATABASE IF EXISTS test;
+    FLUSH PRIVILEGES;
+  " 2>/dev/null
+  
+  # Create socket symlink for compatibility
+  if [ -S "/var/run/mysqld/mysqld.sock" ] && [ ! -S "/tmp/mysql.sock" ]; then
+    ln -s /var/run/mysqld/mysqld.sock /tmp/mysql.sock
+    log "MySQL socket symlink created"
+  fi
+  
+  log "MariaDB installed & secured"
+else
+  err "MariaDB failed to start"
+fi
 
 ########################################
-step "Step 5/12: Install Node.js 18"
+step "Step 5/10: Install Node.js 18"
 ########################################
-curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
-apt-get install -y -qq nodejs > /dev/null 2>&1
-log "Node.js $(node -v 2>/dev/null) installed"
+if ! command -v node > /dev/null 2>&1; then
+  curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
+  apt-get install -y -qq nodejs > /dev/null 2>&1
+fi
+
+if command -v node > /dev/null 2>&1; then
+  log "Node.js $(node -v 2>/dev/null) installed"
+else
+  err "Node.js installation failed!"
+  err "Manual install: curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt install nodejs"
+  exit 1
+fi
 
 ########################################
-step "Step 6/12: Creating LitePanel Pro Structure"
+step "Step 6/10: Creating LitePanel App"
 ########################################
-mkdir -p ${PANEL_DIR}/{src/{controllers,services,middleware,models,utils,routes},public/{css,js},database,logs,temp}
+mkdir -p ${PANEL_DIR}/{public/css,public/js}
 cd ${PANEL_DIR}
 
-########################################
-step "Step 7/12: Creating Core Application Files"
-########################################
-
-# === package.json ===
+# --- package.json ---
 cat > package.json <<'PKGEOF'
 {
-  "name": "litepanel-pro",
-  "version": "3.0.0",
-  "description": "Enterprise Multi-Domain Cloudflare Management Panel",
-  "main": "app.js",
-  "scripts": {
-    "start": "node app.js"
-  },
+  "name": "litepanel",
+  "version": "2.1.0",
+  "private": true,
+  "scripts": { "start": "node app.js" },
   "dependencies": {
     "express": "^4.18.2",
     "express-session": "^1.17.3",
-    "express-rate-limit": "^6.10.0",
     "bcryptjs": "^2.4.3",
     "multer": "^1.4.5-lts.1",
-    "sqlite3": "^5.1.6",
-    "dotenv": "^16.3.1",
-    "helmet": "^7.0.0",
-    "cors": "^2.8.5",
-    "compression": "^1.7.4",
-    "axios": "^1.4.0",
-    "joi": "^17.9.2",
-    "winston": "^3.10.0",
-    "archiver": "^5.3.1",
-    "unzipper": "^0.10.14",
-    "mime-types": "^2.1.35"
+    "axios": "^1.4.0"
   }
 }
 PKGEOF
 
-# === .env ===
-cat > .env <<ENVEOF
-# Server Configuration
-NODE_ENV=production
-PANEL_PORT=${PANEL_PORT}
-SESSION_SECRET=${SESSION_SECRET}
-
-# Database
-DB_PATH=./database/litepanel.db
-
-# Redis Cache
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
-# Security
-ENCRYPTION_KEY=${ENCRYPTION_KEY}
-JWT_SECRET=${JWT_SECRET}
-
-# Admin Credentials
-ADMIN_USER=${ADMIN_USER}
-ADMIN_PASS=${ADMIN_PASS}
-
-# MariaDB
-DB_ROOT_PASS=${DB_ROOT_PASS}
-
-# File Manager
-MAX_UPLOAD_SIZE=100MB
-ALLOWED_FILE_TYPES=.jpg,.jpeg,.png,.gif,.pdf,.doc,.docx,.txt,.zip,.tar,.gz
-
-# Logging
-LOG_LEVEL=info
-LOG_DIR=./logs
-ENVEOF
-
 log "Installing npm dependencies..."
-npm install --production > /tmp/npm_install.log 2>&1 || {
-  warn "npm install failed, retrying..."
-  npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
-}
-log "Dependencies installed"
+npm install --production > /tmp/npm_install.log 2>&1
+NPM_RC=$?
 
-########################################
-# === app.js (Main Application) ===
-########################################
+if [ $NPM_RC -ne 0 ]; then
+  warn "npm install failed (code $NPM_RC), retrying with legacy-peer-deps..."
+  npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
+  NPM_RC=$?
+fi
+
+if [ $NPM_RC -ne 0 ]; then
+  err "npm install failed. Check /tmp/npm_install.log"
+  tail -10 /tmp/npm_install.log
+  exit 1
+fi
+log "npm dependencies installed"
+
+# --- config.json with stronger credentials ---
+HASHED_PASS=$(node -e "console.log(require('bcryptjs').hashSync('${ADMIN_PASS}', 10))" 2>/dev/null)
+SESSION_SECRET=$(openssl rand -hex 32)
+
+cat > config.json <<CFGEOF
+{
+  "adminUser": "${ADMIN_USER}",
+  "adminPass": "${HASHED_PASS}",
+  "dbRootPass": "${DB_ROOT_PASS}",
+  "panelPort": ${PANEL_PORT},
+  "sessionSecret": "${SESSION_SECRET}"
+}
+CFGEOF
+
+##############################################
+# -------- app.js (Backend) --------
+##############################################
 cat > app.js <<'APPEOF'
 const express = require('express');
 const session = require('express-session');
-const helmet = require('helmet');
-const cors = require('cors');
-const compression = require('compression');
-const path = require('path');
-const http = require('http');
-require('dotenv').config();
-
-const logger = require('./src/utils/logger');
-const database = require('./src/utils/database');
-const routes = require('./src/routes');
-
-class LitePanelApp {
-  constructor() {
-    this.app = express();
-    this.server = http.createServer(this.app);
-  }
-
-  async initialize() {
-    try {
-      // Initialize database
-      await database.initialize();
-      logger.info('Database initialized');
-
-      // Setup middleware
-      this.setupMiddleware();
-
-      // Setup routes
-      this.setupRoutes();
-
-      // Start server
-      const port = process.env.PANEL_PORT || 3000;
-      this.server.listen(port, '0.0.0.0', () => {
-        logger.info(`LitePanel Pro running on port ${port}`);
-      });
-
-    } catch (error) {
-      logger.error('Failed to initialize application:', error);
-      process.exit(1);
-    }
-  }
-
-  setupMiddleware() {
-    // Security headers
-    this.app.use(helmet({
-      contentSecurityPolicy: {
-        directives: {
-          defaultSrc: ["'self'"],
-          styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
-          scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-          imgSrc: ["'self'", "data:", "https:"],
-          connectSrc: ["'self'"]
-        }
-      }
-    }));
-
-    this.app.use(cors());
-    this.app.use(compression());
-    this.app.use(express.json({ limit: '50mb' }));
-    this.app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-    // Session
-    this.app.use(session({
-      secret: process.env.SESSION_SECRET,
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: false,
-        httpOnly: true,
-        maxAge: 24 * 60 * 60 * 1000,
-        sameSite: 'strict'
-      }
-    }));
-
-    // Static files
-    this.app.use(express.static(path.join(__dirname, 'public')));
-  }
-
-  setupRoutes() {
-    this.app.use('/api', routes);
-    this.app.get('*', (req, res) => {
-      res.sendFile(path.join(__dirname, 'public', 'index.html'));
-    });
-  }
-}
-
-const app = new LitePanelApp();
-app.initialize().catch(console.error);
-
-process.on('SIGINT', async () => {
-  logger.info('Shutting down gracefully...');
-  await database.close();
-  process.exit(0);
-});
-APPEOF
-
-########################################
-# === src/utils/logger.js ===
-########################################
-cat > src/utils/logger.js <<'LOGEOF'
-const winston = require('winston');
-const path = require('path');
-
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
-      )
-    }),
-    new winston.transports.File({
-      filename: path.join(process.env.LOG_DIR || './logs', 'error.log'),
-      level: 'error'
-    }),
-    new winston.transports.File({
-      filename: path.join(process.env.LOG_DIR || './logs', 'combined.log')
-    })
-  ]
-});
-
-module.exports = logger;
-LOGEOF
-
-########################################
-# === src/utils/database.js ===
-########################################
-cat > src/utils/database.js <<'DBEOF'
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const fs = require('fs').promises;
 const bcrypt = require('bcryptjs');
-const logger = require('./logger');
-
-class Database {
-  constructor() {
-    this.db = null;
-  }
-
-  async initialize() {
-    const dbPath = path.resolve(process.env.DB_PATH || './database/litepanel.db');
-    const dbDir = path.dirname(dbPath);
-    await fs.mkdir(dbDir, { recursive: true });
-
-    return new Promise((resolve, reject) => {
-      this.db = new sqlite3.Database(dbPath, (err) => {
-        if (err) {
-          logger.error('Failed to open database:', err);
-          reject(err);
-        } else {
-          logger.info('Database connected');
-          this.createTables().then(resolve).catch(reject);
-        }
-      });
-    });
-  }
-
-  async createTables() {
-    const queries = [
-      `CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        email TEXT,
-        role TEXT DEFAULT 'admin',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      `CREATE TABLE IF NOT EXISTS cloudflare_accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        email TEXT NOT NULL,
-        api_token TEXT NOT NULL,
-        account_id TEXT,
-        is_active INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      `CREATE TABLE IF NOT EXISTS domains (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL,
-        cloudflare_account_id INTEGER,
-        cloudflare_zone_id TEXT,
-        status TEXT DEFAULT 'active',
-        ssl_mode TEXT DEFAULT 'flexible',
-        doc_root TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (cloudflare_account_id) REFERENCES cloudflare_accounts(id)
-      )`,
-      `CREATE TABLE IF NOT EXISTS activity_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        action TEXT NOT NULL,
-        resource TEXT,
-        details TEXT,
-        ip_address TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`
-    ];
-
-    for (const query of queries) {
-      await this.run(query);
-    }
-
-    // Create default admin user
-    const adminExists = await this.get('SELECT id FROM users WHERE username = ?', [process.env.ADMIN_USER]);
-    if (!adminExists) {
-      const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASS, 10);
-      await this.run(
-        'INSERT INTO users (username, password, email, role) VALUES (?, ?, ?, ?)',
-        [process.env.ADMIN_USER, hashedPassword, 'admin@localhost', 'admin']
-      );
-      logger.info('Default admin user created');
-    }
-  }
-
-  run(query, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.run(query, params, function(err) {
-        if (err) reject(err);
-        else resolve({ id: this.lastID, changes: this.changes });
-      });
-    });
-  }
-
-  get(query, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.get(query, params, (err, row) => {
-        if (err) reject(err);
-        else resolve(row);
-      });
-    });
-  }
-
-  all(query, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.all(query, params, (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows);
-      });
-    });
-  }
-
-  async close() {
-    return new Promise((resolve) => {
-      if (this.db) {
-        this.db.close(() => resolve());
-      } else {
-        resolve();
-      }
-    });
-  }
-}
-
-module.exports = new Database();
-DBEOF
-
-########################################
-# === src/routes/index.js ===
-########################################
-cat > src/routes/index.js <<'ROUTEEOF'
-const express = require('express');
-const router = express.Router();
-const authController = require('../controllers/auth.controller');
-const dashboardController = require('../controllers/dashboard.controller');
-const domainController = require('../controllers/domain.controller');
-const fileController = require('../controllers/file.controller');
-const cloudflareController = require('../controllers/cloudflare.controller');
-const { auth } = require('../middleware/auth.middleware');
-
-// Public routes
-router.post('/auth/login', authController.login);
-router.get('/auth/check', authController.check);
-router.post('/auth/logout', authController.logout);
-
-// Protected routes
-router.use(auth); // All routes below require authentication
-
-// Dashboard
-router.get('/dashboard', dashboardController.getStats);
-router.get('/services', dashboardController.getServices);
-router.post('/services/:name/:action', dashboardController.controlService);
-
-// Domains
-router.get('/domains', domainController.list);
-router.post('/domains', domainController.create);
-router.delete('/domains/:name', domainController.remove);
-
-// File Manager
-router.get('/files', fileController.list);
-router.get('/files/download', fileController.download);
-router.post('/files/upload', fileController.upload);
-router.post('/files/create', fileController.create);
-router.put('/files', fileController.update);
-router.delete('/files', fileController.remove);
-router.post('/files/rename', fileController.rename);
-router.post('/files/extract', fileController.extract);
-router.post('/files/compress', fileController.compress);
-
-// Cloudflare
-router.get('/cloudflare/accounts', cloudflareController.listAccounts);
-router.post('/cloudflare/accounts', cloudflareController.addAccount);
-router.delete('/cloudflare/accounts/:id', cloudflareController.removeAccount);
-router.get('/cloudflare/zones/:accountId', cloudflareController.listZones);
-router.post('/cloudflare/zones/:accountId', cloudflareController.createZone);
-router.get('/cloudflare/dns/:zoneId', cloudflareController.listDNS);
-router.post('/cloudflare/dns/:zoneId', cloudflareController.createDNS);
-router.put('/cloudflare/dns/:zoneId/:recordId', cloudflareController.updateDNS);
-router.delete('/cloudflare/dns/:zoneId/:recordId', cloudflareController.deleteDNS);
-router.post('/cloudflare/cache/:zoneId/purge', cloudflareController.purgeCache);
-
-module.exports = router;
-ROUTEEOF
-
-########################################
-# === src/middleware/auth.middleware.js ===
-########################################
-cat > src/middleware/auth.middleware.js <<'AUTHEOF'
-function auth(req, res, next) {
-  if (req.session && req.session.user) {
-    return next();
-  }
-  res.status(401).json({ error: 'Unauthorized' });
-}
-
-module.exports = { auth };
-AUTHEOF
-
-########################################
-# === src/controllers/auth.controller.js ===
-########################################
-cat > src/controllers/auth.controller.js <<'AUTHCEOF'
-const bcrypt = require('bcryptjs');
-const database = require('../utils/database');
-const logger = require('../utils/logger');
-
-class AuthController {
-  async login(req, res) {
-    try {
-      const { username, password } = req.body;
-      
-      const user = await database.get(
-        'SELECT * FROM users WHERE username = ?',
-        [username]
-      );
-
-      if (!user || !await bcrypt.compare(password, user.password)) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      req.session.user = {
-        id: user.id,
-        username: user.username,
-        role: user.role
-      };
-
-      // Log activity
-      await database.run(
-        'INSERT INTO activity_logs (user_id, action, ip_address) VALUES (?, ?, ?)',
-        [user.id, 'login', req.ip]
-      );
-
-      res.json({
-        success: true,
-        user: {
-          username: user.username,
-          role: user.role
-        }
-      });
-    } catch (error) {
-      logger.error('Login error:', error);
-      res.status(500).json({ error: 'Login failed' });
-    }
-  }
-
-  async logout(req, res) {
-    if (req.session.user) {
-      await database.run(
-        'INSERT INTO activity_logs (user_id, action, ip_address) VALUES (?, ?, ?)',
-        [req.session.user.id, 'logout', req.ip]
-      );
-    }
-    req.session.destroy();
-    res.json({ success: true });
-  }
-
-  async check(req, res) {
-    res.json({
-      authenticated: !!(req.session && req.session.user),
-      user: req.session?.user || null
-    });
-  }
-}
-
-module.exports = new AuthController();
-AUTHCEOF
-
-########################################
-# === src/controllers/dashboard.controller.js ===
-########################################
-cat > src/controllers/dashboard.controller.js <<'DASHEOF'
+const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
-const logger = require('../utils/logger');
+const multer = require('multer');
+const axios = require('axios'); // Untuk HTTP requests ke Cloudflare API
 
-class DashboardController {
-  async getStats(req, res) {
-    try {
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      const cpus = os.cpus();
-      
-      // Get disk usage
-      let disk = { total: 0, used: 0, free: 0 };
-      try {
-        const df = execSync("df -B1 / | tail -1").toString().split(/\s+/);
-        disk = { total: parseInt(df[1]), used: parseInt(df[2]), free: parseInt(df[3]) };
-      } catch (e) {}
-
-      res.json({
-        hostname: os.hostname(),
-        ip: req.socket.localAddress || 'Unknown',
-        uptime: os.uptime(),
-        cpu: {
-          model: cpus[0]?.model || 'Unknown',
-          cores: cpus.length,
-          load: os.loadavg()
-        },
-        memory: {
-          total: totalMem,
-          used: totalMem - freeMem,
-          free: freeMem
-        },
-        disk,
-        nodeVersion: process.version
-      });
-    } catch (error) {
-      logger.error('Dashboard stats error:', error);
-      res.status(500).json({ error: 'Failed to get stats' });
-    }
-  }
-
-  async getServices(req, res) {
-    const services = ['lsws', 'mariadb', 'redis-server', 'litepanel'];
-    const statuses = [];
-
-    for (const service of services) {
-      try {
-        execSync(`systemctl is-active ${service}`, { stdio: 'pipe' });
-        statuses.push({ name: service, active: true });
-      } catch (e) {
-        statuses.push({ name: service, active: false });
-      }
-    }
-
-    res.json(statuses);
-  }
-
-  async controlService(req, res) {
-    try {
-      const { name, action } = req.params;
-      const allowedServices = ['lsws', 'mariadb', 'redis-server'];
-      const allowedActions = ['start', 'stop', 'restart'];
-
-      if (!allowedServices.includes(name) || !allowedActions.includes(action)) {
-        return res.status(400).json({ error: 'Invalid service or action' });
-      }
-
-      execSync(`systemctl ${action} ${name}`, { timeout: 15000 });
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-}
-
-module.exports = new DashboardController();
-DASHEOF
-
-########################################
-# === src/controllers/domain.controller.js ===
-########################################
-cat > src/controllers/domain.controller.js <<'DOMEOF'
-const fs = require('fs').promises;
-const path = require('path');
-const { execSync } = require('child_process');
-const database = require('../utils/database');
-const logger = require('../utils/logger');
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+let config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 
 const OLS_CONF = '/usr/local/lsws/conf/httpd_config.conf';
 const OLS_VHOST_CONF_DIR = '/usr/local/lsws/conf/vhosts';
 const OLS_VHOST_DIR = '/usr/local/lsws/vhosts';
+const MAX_EDIT_SIZE = 5 * 1024 * 1024;
 
-class DomainController {
-  async list(req, res) {
-    try {
-      const domains = await database.all('SELECT * FROM domains ORDER BY name');
-      res.json(domains);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to list domains' });
-    }
+// Cloudflare API Config Path
+const CF_CONFIG_PATH = path.join(__dirname, 'cloudflare.json');
+
+const app = express();
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(session({
+  secret: config.sessionSecret, resave: false, saveUninitialized: false,
+  cookie: { maxAge: 86400000, httpOnly: true, sameSite: 'strict' }
+}));
+app.use(express.static(path.join(__dirname, 'public')));
+
+var auth = function(req, res, next) {
+  if (req.session && req.session.user) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+};
+
+function run(cmd, timeout) {
+  try { return execSync(cmd, { timeout: timeout || 15000, maxBuffer: 5*1024*1024 }).toString().trim(); }
+  catch(e) { return e.stderr ? e.stderr.toString().trim() : e.message; }
+}
+function svcActive(name) {
+  try { execSync('systemctl is-active ' + name, { stdio: 'pipe' }); return true; }
+  catch(e) { return false; }
+}
+function escRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function shellEsc(s) { return s.replace(/'/g, "'\\''"); }
+
+/* === OLS Config Management === */
+function readOLSConf() { return fs.readFileSync(OLS_CONF, 'utf8'); }
+function writeOLSConf(content) {
+  fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
+  fs.writeFileSync(OLS_CONF, content);
+}
+
+function addDomainToOLS(domain) {
+  var httpd = readOLSConf();
+  if (httpd.includes('virtualhost ' + domain + ' {')) return;
+
+  httpd += '\nvirtualhost ' + domain + ' {\n'
+    + '  vhRoot                  ' + OLS_VHOST_DIR + '/' + domain + '\n'
+    + '  configFile              ' + OLS_VHOST_CONF_DIR + '/' + domain + '/vhconf.conf\n'
+    + '  allowSymbolLink         1\n'
+    + '  enableScript            1\n'
+    + '  restrained              1\n'
+    + '}\n';
+
+  var listenerRe = /(listener\s+HTTP\s*\{[\s\S]*?)(})/;
+  if (listenerRe.test(httpd)) {
+    httpd = httpd.replace(listenerRe,
+      '$1  map                     ' + domain + ' ' + domain + ', www.' + domain + '\n$2');
+  } else {
+    httpd += '\nlistener HTTP {\n  address                 *:80\n  secure                  0\n'
+      + '  map                     ' + domain + ' ' + domain + ', www.' + domain + '\n}\n';
   }
+  writeOLSConf(httpd);
+}
 
-  async create(req, res) {
-    try {
-      const { domain, cloudflareAccountId } = req.body;
-      
-      if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
-        return res.status(400).json({ error: 'Invalid domain name' });
+function removeDomainFromOLS(domain) {
+  var httpd = readOLSConf();
+  fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
+  var vhRe = new RegExp('\\n?virtualhost\\s+' + escRegex(domain) + '\\s*\\{[\\s\\S]*?\\}', 'g');
+  httpd = httpd.replace(vhRe, '');
+  var mapRe = new RegExp('^\\s*map\\s+' + escRegex(domain) + '\\s+.*$', 'gm');
+  httpd = httpd.replace(mapRe, '');
+  httpd = httpd.replace(/\n{3,}/g, '\n\n');
+  fs.writeFileSync(OLS_CONF, httpd);
+}
+
+function createVhostFiles(domain) {
+  var confDir = path.join(OLS_VHOST_CONF_DIR, domain);
+  var docRoot = path.join(OLS_VHOST_DIR, domain, 'html');
+  var logDir  = path.join(OLS_VHOST_DIR, domain, 'logs');
+  fs.mkdirSync(confDir, { recursive: true });
+  fs.mkdirSync(docRoot, { recursive: true });
+  fs.mkdirSync(logDir,  { recursive: true });
+
+  var vhConf = 'docRoot                   $VH_ROOT/html\n'
+    + 'vhDomain                  ' + domain + '\n'
+    + 'vhAliases                 www.' + domain + '\n'
+    + 'enableGzip                1\n\n'
+    + 'index {\n'
+    + '  useServer               0\n'
+    + '  indexFiles              index.php, index.html\n'
+    + '  autoIndex               0\n'
+    + '}\n\n'
+    + 'scripthandler {\n'
+    + '  add                     lsapi:lsphp81 php\n'
+    + '}\n\n'
+    + 'accessControl {\n'
+    + '  allow                   *\n'
+    + '}\n\n'
+    + 'rewrite {\n'
+    + '  enable                  1\n'
+    + '  autoLoadHtaccess        1\n'
+    + '}\n';
+
+  fs.writeFileSync(path.join(confDir, 'vhconf.conf'), vhConf);
+  fs.writeFileSync(path.join(docRoot, 'index.html'),
+    '<!DOCTYPE html>\n<html><head><title>' + domain + '</title></head>\n'
+    + '<body><h1>Welcome to ' + domain + '</h1>\n'
+    + '<p>Hosted on LitePanel with OpenLiteSpeed</p></body></html>\n');
+  try { execSync('chown -R nobody:nogroup ' + path.join(OLS_VHOST_DIR, domain)); } catch(e) {}
+  return docRoot;
+}
+
+function safeRestartOLS() {
+  try {
+    execSync('systemctl restart lsws', { timeout: 15000 });
+    execSync('sleep 2', { timeout: 5000 });
+    try { execSync('systemctl is-active lsws', { stdio: 'pipe' }); }
+    catch(e) {
+      if (fs.existsSync(OLS_CONF + '.bak')) {
+        fs.copyFileSync(OLS_CONF + '.bak', OLS_CONF);
+        execSync('systemctl restart lsws', { timeout: 15000 });
       }
-
-      // Create vhost files
-      const docRoot = await this.createVhostFiles(domain);
-      
-      // Add to OpenLiteSpeed config
-      await this.addDomainToOLS(domain);
-      
-      // Save to database
-      await database.run(
-        'INSERT INTO domains (name, cloudflare_account_id, doc_root) VALUES (?, ?, ?)',
-        [domain, cloudflareAccountId || null, docRoot]
-      );
-
-      // Restart OpenLiteSpeed
-      execSync('systemctl restart lsws', { timeout: 15000 });
-
-      res.json({ success: true, domain, docRoot });
-    } catch (error) {
-      logger.error('Domain creation error:', error);
-      res.status(500).json({ error: 'Failed to create domain' });
+      throw new Error('OLS config error, reverted to backup');
     }
+  } catch(e) { throw e; }
+}
+
+/* === CLOUDFLARE API INTEGRATION === */
+// Fungsi untuk load config Cloudflare
+function loadCloudflareConfig() {
+  try {
+    if (fs.existsSync(CF_CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(CF_CONFIG_PATH, 'utf8'));
+    }
+  } catch(e) {
+    console.error('Error loading Cloudflare config:', e.message);
+  }
+  return { apiToken: '', accountId: '', zones: {} };
+}
+
+// Fungsi untuk save config Cloudflare
+function saveCloudflareConfig(cfConfig) {
+  try {
+    fs.writeFileSync(CF_CONFIG_PATH, JSON.stringify(cfConfig, null, 2));
+    return true;
+  } catch(e) {
+    console.error('Error saving Cloudflare config:', e.message);
+    return false;
+  }
+}
+
+// Fungsi untuk request ke Cloudflare API
+async function cloudflareRequest(endpoint, method, data = null) {
+  const cfConfig = loadCloudflareConfig();
+  
+  if (!cfConfig.apiToken) {
+    throw new Error('API token not configured');
   }
 
-  async remove(req, res) {
+  try {
+    const url = `https://api.cloudflare.com/client/v4${endpoint}`;
+    const headers = {
+      'Authorization': `Bearer ${cfConfig.apiToken}`,
+      'Content-Type': 'application/json'
+    };
+
+    const config = {
+      method,
+      url,
+      headers,
+      validateStatus: () => true // Don't throw on non-200 response
+    };
+
+    if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+      config.data = data;
+    }
+
+    const response = await axios(config);
+    
+    if (!response.data.success) {
+      const error = response.data.errors && response.data.errors.length > 0
+        ? response.data.errors[0].message
+        : 'API request failed';
+      throw new Error(error);
+    }
+
+    return response.data.result;
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`Cloudflare API error: ${error.response.data.errors[0]?.message || 'Unknown API error'}`);
+    }
+    throw error;
+  }
+}
+
+// Verifikasi token dan dapatkan account details
+async function verifyCloudflareToken(token) {
+  try {
+    // Verify token
+    const verifyResponse = await axios({
+      method: 'GET',
+      url: 'https://api.cloudflare.com/client/v4/user/tokens/verify',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      validateStatus: () => true
+    });
+
+    if (!verifyResponse.data.success) {
+      throw new Error('Invalid API token');
+    }
+
+    // Get accounts
+    const accountsResponse = await axios({
+      method: 'GET',
+      url: 'https://api.cloudflare.com/client/v4/accounts',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      validateStatus: () => true
+    });
+
+    if (!accountsResponse.data.success || !accountsResponse.data.result.length) {
+      throw new Error('No accounts found with this token');
+    }
+
+    return accountsResponse.data.result[0];
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`Cloudflare API error: ${error.response.data.errors[0]?.message || 'Unknown API error'}`);
+    }
+    throw error;
+  }
+}
+
+// Fungsi fallback jika axios tidak tersedia (menggunakan curl)
+function cloudflareRequestCurl(endpoint, method, data = null) {
+  const cfConfig = loadCloudflareConfig();
+  
+  if (!cfConfig.apiToken) {
+    throw new Error('API token not configured');
+  }
+
+  let cmd = `curl -s -X ${method} "https://api.cloudflare.com/client/v4${endpoint}" ` +
+            `-H "Authorization: Bearer ${cfConfig.apiToken}" ` +
+            `-H "Content-Type: application/json"`;
+  
+  if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+    cmd += ` -d '${JSON.stringify(data)}'`;
+  }
+
+  try {
+    const result = JSON.parse(run(cmd, 30000));
+    
+    if (!result.success) {
+      const error = result.errors && result.errors.length > 0 
+        ? result.errors[0].message 
+        : 'API request failed';
+      throw new Error(error);
+    }
+    
+    return result.result;
+  } catch (e) {
+    throw new Error(`Cloudflare API error: ${e.message}`);
+  }
+}
+
+/* === Auth === */
+app.post('/api/login', function(req, res) {
+  var u = req.body.username, p = req.body.password;
+  if (u === config.adminUser && bcrypt.compareSync(p, config.adminPass)) {
+    req.session.user = u; res.json({ success: true });
+  } else res.status(401).json({ error: 'Invalid credentials' });
+});
+app.get('/api/logout', function(req, res) { req.session.destroy(); res.json({ success: true }); });
+app.get('/api/auth', function(req, res) { res.json({ authenticated: !!(req.session && req.session.user) }); });
+
+/* === Dashboard === */
+app.get('/api/dashboard', auth, function(req, res) {
+  var tm = os.totalmem(), fm = os.freemem();
+  var disk = { total: 0, used: 0, free: 0 };
+  try { var d = run("df -B1 / | tail -1").split(/\s+/); disk = { total: +d[1], used: +d[2], free: +d[3] }; } catch(e) {}
+  var cpus = os.cpus();
+  res.json({
+    hostname: os.hostname(), ip: run("hostname -I | awk '{print $1}'"),
+    uptime: os.uptime(),
+    cpu: { model: cpus[0] ? cpus[0].model : 'Unknown', cores: cpus.length, load: os.loadavg() },
+    memory: { total: tm, used: tm - fm, free: fm }, disk: disk, nodeVersion: process.version
+  });
+});
+
+/* === Services === */
+app.get('/api/services', auth, function(req, res) {
+  res.json(['lsws','mariadb','fail2ban','cloudflared'].map(function(s) { return { name: s, active: svcActive(s) }; }));
+});
+app.post('/api/services/:name/:action', auth, function(req, res) {
+  var ok = ['lsws','mariadb','fail2ban','cloudflared'], acts = ['start','stop','restart'];
+  if (!ok.includes(req.params.name) || !acts.includes(req.params.action))
+    return res.status(400).json({ error: 'Invalid' });
+  try { execSync('systemctl ' + req.params.action + ' ' + req.params.name, { timeout: 15000 }); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* === File Manager === */
+app.get('/api/files', auth, function(req, res) {
+  var p = path.resolve(req.query.path || '/');
+  try {
+    var stat = fs.statSync(p);
+    if (stat.isDirectory()) {
+      var items = [];
+      fs.readdirSync(p).forEach(function(name) {
+        try {
+          var s = fs.statSync(path.join(p, name));
+          items.push({ name: name, isDir: s.isDirectory(), size: s.size, modified: s.mtime,
+            perms: '0' + (s.mode & parseInt('777', 8)).toString(8) });
+        } catch(e) { items.push({ name: name, isDir: false, size: 0, error: true }); }
+      });
+      res.json({ path: p, items: items });
+    } else {
+      if (stat.size > MAX_EDIT_SIZE) return res.json({ path: p, size: stat.size, tooLarge: true });
+      var buf = Buffer.alloc(Math.min(512, stat.size));
+      if (stat.size > 0) { var fd = fs.openSync(p, 'r'); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd); }
+      if (buf.includes(0)) return res.json({ path: p, size: stat.size, binary: true });
+      res.json({ path: p, content: fs.readFileSync(p, 'utf8'), size: stat.size });
+    }
+  } catch(e) { res.status(404).json({ error: e.message }); }
+});
+app.put('/api/files', auth, function(req, res) {
+  try { fs.writeFileSync(req.body.filePath, req.body.content); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/files', auth, function(req, res) {
+  var target = req.query.path;
+  if (!target || target === '/') return res.status(400).json({ error: 'Cannot delete root' });
+  try { fs.rmSync(target, { recursive: true, force: true }); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+var upload = multer({ dest: '/tmp/uploads/' });
+app.post('/api/files/upload', auth, upload.single('file'), function(req, res) {
+  try { fs.renameSync(req.file.path, path.join(req.body.path || '/tmp', req.file.originalname)); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/files/mkdir', auth, function(req, res) {
+  try { fs.mkdirSync(req.body.path, { recursive: true }); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/files/rename', auth, function(req, res) {
+  try { fs.renameSync(req.body.oldPath, req.body.newPath); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/files/download', auth, function(req, res) {
+  var fp = req.query.path;
+  if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
+  try { if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); res.download(fp); }
+  catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* === Domains === */
+app.get('/api/domains', auth, function(req, res) {
+  try {
+    if (!fs.existsSync(OLS_VHOST_CONF_DIR)) return res.json([]);
+    var list = fs.readdirSync(OLS_VHOST_CONF_DIR).filter(function(n) {
+      return fs.statSync(path.join(OLS_VHOST_CONF_DIR, n)).isDirectory() && n !== 'Example';
+    });
+    res.json(list.map(function(name) { return { name: name, docRoot: path.join(OLS_VHOST_DIR, name, 'html') }; }));
+  } catch(e) { res.json([]); }
+});
+app.post('/api/domains', auth, function(req, res) {
+  var domain = req.body.domain;
+  if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain))
+    return res.status(400).json({ error: 'Invalid domain name' });
+  try {
+    var docRoot = createVhostFiles(domain);
+    addDomainToOLS(domain);
+    safeRestartOLS();
+    res.json({ success: true, domain: domain, docRoot: docRoot });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/domains/:name', auth, function(req, res) {
+  var domain = req.params.name;
+  if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain))
+    return res.status(400).json({ error: 'Invalid domain' });
+  try {
+    removeDomainFromOLS(domain);
+    fs.rmSync(path.join(OLS_VHOST_CONF_DIR, domain), { recursive: true, force: true });
+    safeRestartOLS();
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* === Databases === */
+app.get('/api/databases', auth, function(req, res) {
+  try {
+    var out = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
+    var skip = ['information_schema','performance_schema','mysql','sys'];
+    res.json(out.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); }));
+  } catch(e) { res.json([]); }
+});
+app.post('/api/databases', auth, function(req, res) {
+  var name = req.body.name, user = req.body.user, password = req.body.password;
+  if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name' });
+  if (user && !/^[a-zA-Z0-9_]+$/.test(user)) return res.status(400).json({ error: 'Invalid username' });
+  try {
+    var dp = shellEsc(config.dbRootPass);
+    run("mysql -u root -p'" + dp + "' -e \"CREATE DATABASE IF NOT EXISTS \\`" + name + "\\`;\" 2>/dev/null");
+    if (user && password) {
+      var sp = shellEsc(password);
+      run("mysql -u root -p'" + dp + "' -e \"CREATE USER IF NOT EXISTS '" + user + "'@'localhost' IDENTIFIED BY '" + sp + "'; GRANT ALL ON \\`" + name + "\\`.* TO '" + user + "'@'localhost'; FLUSH PRIVILEGES;\" 2>/dev/null");
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+app.delete('/api/databases/:name', auth, function(req, res) {
+  if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
+  try {
+    run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"DROP DATABASE IF EXISTS \\`" + req.params.name + "\\`;\" 2>/dev/null");
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* === CLOUDFLARE MANAGEMENT ENDPOINTS === */
+// Get Cloudflare config status
+app.get('/api/cloudflare/config', auth, function(req, res) {
+  try {
+    const cfConfig = loadCloudflareConfig();
+    res.json({ 
+      configured: !!cfConfig.apiToken,
+      accountId: cfConfig.accountId,
+      accountName: cfConfig.accountName,
+      email: cfConfig.email,
+      tokenMask: cfConfig.apiToken ? 
+        cfConfig.apiToken.substring(0, 4) + '...' + cfConfig.apiToken.substring(cfConfig.apiToken.length - 4) : ''
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Set Cloudflare API config
+app.post('/api/cloudflare/config', auth, async function(req, res) {
+  try {
+    const { token, email } = req.body;
+    
+    // If empty token, remove config
+    if (!token) {
+      saveCloudflareConfig({ apiToken: '', accountId: '', accountName: '', email: '', zones: {} });
+      return res.json({ success: true, message: 'Cloudflare configuration reset' });
+    }
+    
+    // Verify token and get account info
+    const account = await verifyCloudflareToken(token);
+    
+    // Save configuration
+    const cfConfig = { 
+      apiToken: token, 
+      accountId: account.id,
+      accountName: account.name,
+      email: email || '',
+      zones: {}
+    };
+    
+    saveCloudflareConfig(cfConfig);
+    res.json({ 
+      success: true, 
+      account: { 
+        id: account.id, 
+        name: account.name 
+      }
+    });
+  } catch(e) {
+    console.error('Error configuring Cloudflare:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get all zones (domains)
+app.get('/api/cloudflare/zones', auth, async function(req, res) {
+  try {
+    let result;
+    
     try {
-      const { name } = req.params;
-      
-      // Remove from OpenLiteSpeed
-      await this.removeDomainFromOLS(name);
-      
-      // Remove files
-      await fs.rm(path.join(OLS_VHOST_CONF_DIR, name), { recursive: true, force: true });
-      await fs.rm(path.join(OLS_VHOST_DIR, name), { recursive: true, force: true });
-      
-      // Remove from database
-      await database.run('DELETE FROM domains WHERE name = ?', [name]);
-      
-      // Restart OpenLiteSpeed
-      execSync('systemctl restart lsws', { timeout: 15000 });
-
-      res.json({ success: true });
-    } catch (error) {
-      logger.error('Domain removal error:', error);
-      res.status(500).json({ error: 'Failed to remove domain' });
+      // Try using axios first
+      result = await cloudflareRequest('/zones?per_page=50', 'GET');
+    } catch (axiosError) {
+      // Fallback to curl if axios fails
+      console.log('Axios request failed, falling back to curl:', axiosError.message);
+      result = cloudflareRequestCurl('/zones?per_page=50', 'GET');
     }
+    
+    // Map result to a simpler structure
+    const zones = result.map(zone => ({
+      id: zone.id,
+      name: zone.name,
+      status: zone.status,
+      nameServers: zone.name_servers || [],
+      originalNameServers: zone.original_name_servers || [],
+      paused: !!zone.paused
+    }));
+    
+    // Update the stored zone information in our config
+    const cfConfig = loadCloudflareConfig();
+    zones.forEach(zone => {
+      cfConfig.zones[zone.name] = { id: zone.id };
+    });
+    saveCloudflareConfig(cfConfig);
+    
+    res.json(zones);
+  } catch(e) {
+    console.error('Error getting Cloudflare zones:', e);
+    res.status(500).json({ error: e.message });
   }
+});
 
-  async createVhostFiles(domain) {
-    const confDir = path.join(OLS_VHOST_CONF_DIR, domain);
-    const docRoot = path.join(OLS_VHOST_DIR, domain, 'html');
-    const logDir = path.join(OLS_VHOST_DIR, domain, 'logs');
+// Get single zone details
+app.get('/api/cloudflare/zones/:id', auth, async function(req, res) {
+  try {
+    let result;
+    try {
+      result = await cloudflareRequest(`/zones/${req.params.id}`, 'GET');
+    } catch (axiosError) {
+      result = cloudflareRequestCurl(`/zones/${req.params.id}`, 'GET');
+    }
+    res.json(result);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    await fs.mkdir(confDir, { recursive: true });
-    await fs.mkdir(docRoot, { recursive: true });
-    await fs.mkdir(logDir, { recursive: true });
+// Get DNS records for a zone
+app.get('/api/cloudflare/zones/:id/dns', auth, async function(req, res) {
+  try {
+    let result;
+    try {
+      result = await cloudflareRequest(`/zones/${req.params.id}/dns_records?per_page=100`, 'GET');
+    } catch (axiosError) {
+      result = cloudflareRequestCurl(`/zones/${req.params.id}/dns_records?per_page=100`, 'GET');
+    }
+    res.json(result);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
-    const vhConf = `docRoot                   $VH_ROOT/html
-vhDomain                  ${domain}
-vhAliases                 www.${domain}
+// Add a new zone (domain)
+app.post('/api/cloudflare/zones', auth, async function(req, res) {
+  try {
+    const domain = req.body.domain;
+    
+    if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
+      return res.status(400).json({ error: 'Invalid domain name' });
+    }
+    
+    const cfConfig = loadCloudflareConfig();
+    if (!cfConfig.apiToken || !cfConfig.accountId) {
+      return res.status(400).json({ error: 'Cloudflare API not configured' });
+    }
+
+    // Add domain to Cloudflare
+    let result;
+    try {
+      result = await cloudflareRequest('/zones', 'POST', {
+        name: domain,
+        account: { id: cfConfig.accountId },
+        jump_start: true
+      });
+    } catch (axiosError) {
+      result = cloudflareRequestCurl('/zones', 'POST', {
+        name: domain,
+        account: { id: cfConfig.accountId },
+        jump_start: true
+      });
+    }
+    
+    // Save zone info to our config
+    cfConfig.zones[domain] = { id: result.id };
+    saveCloudflareConfig(cfConfig);
+    
+    // Create vhost if requested
+    if (req.body.createVhost) {
+      try {
+        const docRoot = createVhostFiles(domain);
+        addDomainToOLS(domain);
+        safeRestartOLS();
+      } catch (e) {
+        console.error('Error creating local vhost:', e);
+      }
+    }
+    
+    res.json({
+      success: true,
+      zone: {
+        id: result.id,
+        name: result.name,
+        status: result.status,
+        nameServers: result.name_servers || []
+      }
+    });
+  } catch(e) {
+    console.error('Error adding Cloudflare zone:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete a zone
+app.delete('/api/cloudflare/zones/:id', auth, async function(req, res) {
+  try {
+    const zoneId = req.params.id;
+    
+    // Get zone details first to get the domain name
+    let zoneInfo;
+    try {
+      try {
+        zoneInfo = await cloudflareRequest(`/zones/${zoneId}`, 'GET');
+      } catch (axiosError) {
+        zoneInfo = cloudflareRequestCurl(`/zones/${zoneId}`, 'GET');
+      }
+    } catch (e) {
+      // If zone doesn't exist in Cloudflare, it might already be deleted
+      console.log('Zone info not found, may already be deleted:', e.message);
+    }
+    
+    // Delete from Cloudflare
+    try {
+      try {
+        await cloudflareRequest(`/zones/${zoneId}`, 'DELETE');
+      } catch (axiosError) {
+        cloudflareRequestCurl(`/zones/${zoneId}`, 'DELETE');
+      }
+    } catch (e) {
+      console.log('Error deleting zone from Cloudflare:', e.message);
+      // Continue with local cleanup even if Cloudflare deletion fails
+    }
+    
+    // Remove from our config
+    const cfConfig = loadCloudflareConfig();
+    if (zoneInfo && zoneInfo.name) {
+      delete cfConfig.zones[zoneInfo.name];
+      
+      // Also remove local vhost if it exists
+      try {
+        removeDomainFromOLS(zoneInfo.name);
+        fs.rmSync(path.join(OLS_VHOST_CONF_DIR, zoneInfo.name), { recursive: true, force: true });
+        safeRestartOLS();
+      } catch (e) {
+        console.error('Error removing local vhost:', e);
+      }
+    }
+    saveCloudflareConfig(cfConfig);
+    
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Error deleting Cloudflare zone:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Add DNS record
+app.post('/api/cloudflare/zones/:id/dns', auth, async function(req, res) {
+  try {
+    const zoneId = req.params.id;
+    const record = req.body;
+    
+    if (!record.type || !record.name || (record.type !== 'MX' && !record.content)) {
+      return res.status(400).json({ error: 'Invalid DNS record data' });
+    }
+    
+    let result;
+    try {
+      result = await cloudflareRequest(`/zones/${zoneId}/dns_records`, 'POST', record);
+    } catch (axiosError) {
+      result = cloudflareRequestCurl(`/zones/${zoneId}/dns_records`, 'POST', record);
+    }
+    
+    res.json({ success: true, record: result });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Update DNS record
+app.put('/api/cloudflare/zones/:zoneId/dns/:recordId', auth, async function(req, res) {
+  try {
+    const zoneId = req.params.zoneId;
+    const recordId = req.params.recordId;
+    const record = req.body;
+    
+    if (!record.type || !record.name || (record.type !== 'MX' && !record.content)) {
+      return res.status(400).json({ error: 'Invalid DNS record data' });
+    }
+    
+    let result;
+    try {
+      result = await cloudflareRequest(
+        `/zones/${zoneId}/dns_records/${recordId}`, 
+        'PUT', 
+        record
+      );
+    } catch (axiosError) {
+      result = cloudflareRequestCurl(
+        `/zones/${zoneId}/dns_records/${recordId}`, 
+        'PUT', 
+        record
+      );
+    }
+    
+    res.json({ success: true, record: result });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete DNS record
+app.delete('/api/cloudflare/zones/:zoneId/dns/:recordId', auth, async function(req, res) {
+  try {
+    const zoneId = req.params.zoneId;
+    const recordId = req.params.recordId;
+    
+    try {
+      await cloudflareRequest(`/zones/${zoneId}/dns_records/${recordId}`, 'DELETE');
+    } catch (axiosError) {
+      cloudflareRequestCurl(`/zones/${zoneId}/dns_records/${recordId}`, 'DELETE');
+    }
+    
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* === Tunnel === */
+app.get('/api/tunnel/status', auth, function(req, res) { res.json({ active: svcActive('cloudflared') }); });
+app.post('/api/tunnel/setup', auth, function(req, res) {
+  var token = req.body.token;
+  if (!token) return res.status(400).json({ error: 'Token required' });
+  var safeToken = token.replace(/[;&|`$(){}]/g, '');
+  try {
+    fs.writeFileSync('/etc/systemd/system/cloudflared.service',
+      '[Unit]\nDescription=Cloudflare Tunnel\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/cloudflared tunnel run --token ' + safeToken + '\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n');
+    execSync('systemctl daemon-reload && systemctl enable cloudflared && systemctl restart cloudflared', { timeout: 15000 });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* === Settings === */
+app.post('/api/settings/password', auth, function(req, res) {
+  if (!bcrypt.compareSync(req.body.currentPassword, config.adminPass))
+    return res.status(401).json({ error: 'Wrong current password' });
+  if (!req.body.newPassword || req.body.newPassword.length < 6)
+    return res.status(400).json({ error: 'Min 6 characters' });
+  config.adminPass = bcrypt.hashSync(req.body.newPassword, 10);
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  res.json({ success: true });
+});
+
+/* === Terminal === */
+app.post('/api/terminal', auth, function(req, res) {
+  if (!req.body.command) return res.json({ output: '' });
+  try { res.json({ output: run(req.body.command, 30000) }); }
+  catch(e) { res.json({ output: e.message }); }
+});
+
+app.listen(config.panelPort, '0.0.0.0', function() {
+  console.log('LitePanel running on port ' + config.panelPort);
+});
+APPEOF
+
+##############################################
+# -------- public/index.html --------
+##############################################
+cat > public/index.html <<'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>LitePanel</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="loginPage" class="login-page">
+  <div class="login-box">
+    <h1>🖥️ LitePanel</h1>
+    <form id="loginForm">
+      <input type="text" id="username" placeholder="Username" required>
+      <input type="password" id="password" placeholder="Password" required>
+      <button type="submit">Login</button>
+      <div id="loginError" class="error"></div>
+    </form>
+  </div>
+</div>
+<div id="mainPanel" class="main-panel" style="display:none">
+  <button id="mobileToggle" class="mobile-toggle">☰</button>
+  <aside class="sidebar" id="sidebar">
+    <div class="logo">🖥️ LitePanel</div>
+    <nav>
+      <a href="#" data-page="dashboard" class="active">📊 Dashboard</a>
+      <a href="#" data-page="services">⚙️ Services</a>
+      <a href="#" data-page="files">📁 Files</a>
+      <a href="#" data-page="domains">🌐 Domains</a>
+      <a href="#" data-page="cloudflare">☁️ Cloudflare</a>
+      <a href="#" data-page="databases">🗃️ Databases</a>
+      <a href="#" data-page="tunnel">☁️ Tunnel</a>
+      <a href="#" data-page="terminal">💻 Terminal</a>
+      <a href="#" data-page="settings">🔧 Settings</a>
+    </nav>
+    <a href="#" id="logoutBtn" class="logout-btn">🚪 Logout</a>
+  </aside>
+  <main class="content" id="content"></main>
+</div>
+<script src="/js/app.js"></script>
+</body>
+</html>
+HTMLEOF
+
+##############################################
+# -------- public/css/style.css --------
+##############################################
+cat > public/css/style.css <<'CSSEOF'
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1d23;color:#e0e0e0}
+.login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#0f1117,#1a1d23)}
+.login-box{background:#2a2d35;padding:40px;border-radius:12px;width:360px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.login-box h1{text-align:center;color:#4f8cff;margin-bottom:30px;font-size:28px}
+.login-box input{width:100%;padding:12px 16px;margin-bottom:16px;background:#1a1d23;border:1px solid #3a3d45;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none}
+.login-box input:focus{border-color:#4f8cff}
+.login-box button{width:100%;padding:12px;background:#4f8cff;border:none;border-radius:8px;color:#fff;font-size:16px;cursor:pointer;font-weight:600}
+.login-box button:hover{background:#3a7ae0}
+.error{color:#e74c3c;text-align:center;margin-top:10px;font-size:14px}
+.main-panel{display:flex;min-height:100vh}
+.sidebar{width:220px;background:#12141a;display:flex;flex-direction:column;position:fixed;height:100vh;z-index:10;transition:transform .3s}
+.sidebar .logo{padding:20px;font-size:20px;font-weight:700;color:#4f8cff;border-bottom:1px solid #2a2d35}
+.sidebar nav{flex:1;padding:10px 0;overflow-y:auto}
+.sidebar nav a{display:block;padding:12px 20px;color:#8a8d93;text-decoration:none;transition:.2s;font-size:14px}
+.sidebar nav a:hover,.sidebar nav a.active{background:#1a1d23;color:#4f8cff;border-right:3px solid #4f8cff}
+.logout-btn{padding:15px 20px;color:#e74c3c;text-decoration:none;border-top:1px solid #2a2d35;font-size:14px}
+.content{flex:1;margin-left:220px;padding:30px;min-height:100vh}
+.mobile-toggle{display:none;position:fixed;top:10px;left:10px;z-index:20;background:#2a2d35;border:none;color:#e0e0e0;font-size:24px;padding:8px 12px;border-radius:8px;cursor:pointer}
+@media(max-width:768px){
+  .mobile-toggle{display:block}
+  .sidebar{transform:translateX(-100%)}
+  .sidebar.open{transform:translateX(0)}
+  .content{margin-left:0;padding:15px;padding-top:55px}
+  .stats-grid{grid-template-columns:1fr!important}
+  .flex-row{flex-direction:column}
+}
+.page-title{font-size:24px;margin-bottom:8px}
+.page-sub{color:#8a8d93;margin-bottom:25px;font-size:14px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:25px}
+.card{background:#2a2d35;padding:20px;border-radius:10px}
+.card .label{font-size:12px;color:#8a8d93;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.card .value{font-size:22px;font-weight:700;color:#4f8cff}
+.card .sub{font-size:12px;color:#6a6d73;margin-top:4px}
+.progress{background:#1a1d23;border-radius:8px;height:8px;margin-top:8px;overflow:hidden}
+.progress-bar{height:100%;border-radius:8px;background:#4f8cff;transition:width .3s}
+.progress-bar.warn{background:#f39c12}
+.progress-bar.danger{background:#e74c3c}
+table.tbl{width:100%;border-collapse:collapse;background:#2a2d35;border-radius:10px;overflow:hidden}
+.tbl th{background:#1a1d23;padding:12px 16px;text-align:left;font-size:12px;color:#8a8d93;text-transform:uppercase}
+.tbl td{padding:12px 16px;border-bottom:1px solid #1a1d23;font-size:14px}
+.btn{padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:.2s;display:inline-block;text-decoration:none}
+.btn:hover{opacity:.85}
+.btn-p{background:#4f8cff;color:#fff}
+.btn-s{background:#2ecc71;color:#fff}
+.btn-d{background:#e74c3c;color:#fff}
+.btn-w{background:#f39c12;color:#fff}
+.btn-sm{padding:4px 10px;font-size:12px}
+.badge{padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.badge-on{background:rgba(46,204,113,.15);color:#2ecc71}
+.badge-off{background:rgba(231,76,60,.15);color:#e74c3c}
+.form-control{width:100%;padding:10px 14px;background:#1a1d23;border:1px solid #3a3d45;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none}
+.form-control:focus{border-color:#4f8cff}
+textarea.form-control{min-height:300px;font-family:'Courier New',monospace;font-size:13px;resize:vertical}
+.alert{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:14px}
+.alert-ok{background:rgba(46,204,113,.1);border:1px solid #2ecc71;color:#2ecc71}
+.alert-err{background:rgba(231,76,60,.1);border:1px solid #e74c3c;color:#e74c3c}
+.breadcrumb{display:flex;gap:5px;margin-bottom:15px;flex-wrap:wrap;font-size:14px}
+.breadcrumb a{color:#4f8cff;text-decoration:none;cursor:pointer}
+.breadcrumb span{color:#6a6d73}
+.file-item{display:flex;align-items:center;padding:10px 16px;background:#2a2d35;margin-bottom:2px;cursor:pointer;border-radius:4px;font-size:14px}
+.file-item:hover{background:#32353d}
+.file-item .icon{margin-right:10px;font-size:16px}
+.file-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-item .size{color:#8a8d93;margin-right:10px;min-width:70px;text-align:right;font-size:13px}
+.file-item .perms{color:#6a6d73;margin-right:10px;font-family:monospace;font-size:12px}
+.file-actions{display:flex;gap:4px}
+.terminal-box{background:#0d0d0d;color:#0f0;font-family:'Courier New',monospace;padding:20px;border-radius:10px;min-height:350px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:13px}
+.term-input{display:flex;gap:10px;margin-top:10px}
+.term-input input{flex:1;background:#0d0d0d;border:1px solid #333;color:#0f0;font-family:'Courier New',monospace;padding:10px;border-radius:6px;outline:none}
+.flex-row{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:16px}
+.mt{margin-top:16px}.mb{margin-bottom:16px}
+
+/* Modal Styles for Cloudflare DNS Management */
+.modal { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:1000; }
+.modal-content { background:#2a2d35; padding:25px; border-radius:12px; width:500px; max-width:90%; }
+.modal-title { margin-bottom:20px; font-size:18px; }
+.modal-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+.modal label { font-size:12px; color:#8a8d93; display:block; margin-bottom:6px; }
+CSSEOF
+
+##############################################
+# -------- public/js/app.js (Frontend) ------
+##############################################
+cat > public/js/app.js <<'JSEOF'
+var api = {
+  req: function(url, opt) {
+    opt = opt || {};
+    var h = {};
+    if (!(opt.body instanceof FormData)) h['Content-Type'] = 'application/json';
+    return fetch(url, {
+      headers: h, method: opt.method || 'GET',
+      body: opt.body instanceof FormData ? opt.body : opt.body ? JSON.stringify(opt.body) : undefined
+    }).then(function(r) { return r.json(); });
+  },
+  get: function(u) { return api.req(u); },
+  post: function(u, b) { return api.req(u, { method: 'POST', body: b }); },
+  put: function(u, b) { return api.req(u, { method: 'PUT', body: b }); },
+  del: function(u) { return api.req(u, { method: 'DELETE' }); }
+};
+
+var $ = function(id) { return document.getElementById(id); };
+function fmtB(b) { if(!b)return '0 B'; var k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k)); return (b/Math.pow(k,i)).toFixed(1)+' '+s[i]; }
+function fmtUp(s) { var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60); return d+'d '+h+'h '+m+'m'; }
+function esc(t) { var d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
+function pClass(p) { return p>80?'danger':p>60?'warn':''; }
+
+var curPath = '/usr/local/lsws';
+var editFile = '';
+
+function checkAuth() {
+  api.get('/api/auth').then(function(r) {
+    if (r.authenticated) { showPanel(); loadPage('dashboard'); } else showLogin();
+  });
+}
+function showLogin() { $('loginPage').style.display='flex'; $('mainPanel').style.display='none'; }
+function showPanel() { $('loginPage').style.display='none'; $('mainPanel').style.display='flex'; }
+
+$('loginForm').addEventListener('submit', function(e) {
+  e.preventDefault();
+  api.post('/api/login', { username: $('username').value, password: $('password').value }).then(function(r) {
+    if (r.success) { showPanel(); loadPage('dashboard'); } else $('loginError').textContent='Invalid credentials';
+  });
+});
+$('logoutBtn').addEventListener('click', function(e) { e.preventDefault(); api.get('/api/logout').then(showLogin); });
+$('mobileToggle').addEventListener('click', function() { $('sidebar').classList.toggle('open'); });
+
+document.querySelectorAll('.sidebar nav a').forEach(function(a) {
+  a.addEventListener('click', function(e) {
+    e.preventDefault();
+    document.querySelectorAll('.sidebar nav a').forEach(function(x) { x.classList.remove('active'); });
+    a.classList.add('active');
+    loadPage(a.dataset.page);
+    $('sidebar').classList.remove('open');
+  });
+});
+
+function loadPage(p) {
+  var el = $('content');
+  switch(p) {
+    case 'dashboard': return pgDash(el);
+    case 'services':  return pgSvc(el);
+    case 'files':     return pgFiles(el);
+    case 'domains':   return pgDom(el);
+    case 'cloudflare': return pgCloudflare(el);
+    case 'databases': return pgDb(el);
+    case 'tunnel':    return pgTun(el);
+    case 'terminal':  return pgTerm(el);
+    case 'settings':  return pgSet(el);
+  }
+}
+
+function pgDash(el) {
+  Promise.all([api.get('/api/dashboard'), api.get('/api/services')]).then(function(res) {
+    var d = res[0], s = res[1];
+    var mp = Math.round(d.memory.used/d.memory.total*100);
+    var dp = d.disk.total ? Math.round(d.disk.used/d.disk.total*100) : 0;
+    el.innerHTML = '<h2 class="page-title">📊 Dashboard</h2><p class="page-sub">'+d.hostname+' ('+d.ip+')</p>'
+      +'<div class="stats-grid">'
+      +'<div class="card"><div class="label">CPU</div><div class="value">'+d.cpu.cores+' Cores</div><div class="sub">Load: '+d.cpu.load.map(function(l){return l.toFixed(2)}).join(', ')+'</div></div>'
+      +'<div class="card"><div class="label">Memory</div><div class="value">'+mp+'%</div><div class="progress"><div class="progress-bar '+pClass(mp)+'" style="width:'+mp+'%"></div></div><div class="sub">'+fmtB(d.memory.used)+' / '+fmtB(d.memory.total)+'</div></div>'
+      +'<div class="card"><div class="label">Disk</div><div class="value">'+dp+'%</div><div class="progress"><div class="progress-bar '+pClass(dp)+'" style="width:'+dp+'%"></div></div><div class="sub">'+fmtB(d.disk.used)+' / '+fmtB(d.disk.total)+'</div></div>'
+      +'<div class="card"><div class="label">Uptime</div><div class="value">'+fmtUp(d.uptime)+'</div><div class="sub">Node '+d.nodeVersion+'</div></div>'
+      +'</div><h3 class="mb">Services</h3><table class="tbl"><thead><tr><th>Service</th><th>Status</th></tr></thead><tbody>'
+      +s.map(function(x){return '<tr><td>'+x.name+'</td><td><span class="badge '+(x.active?'badge-on':'badge-off')+'">'+(x.active?'Running':'Stopped')+'</span></td></tr>';}).join('')
+      +'</tbody></table>'
+      +'<div class="mt"><a href="http://'+d.ip+':7080" target="_blank" class="btn btn-p">OLS Admin</a> <a href="http://'+d.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w">phpMyAdmin</a></div>';
+  });
+}
+
+function pgSvc(el) {
+  api.get('/api/services').then(function(s) {
+    el.innerHTML = '<h2 class="page-title">⚙️ Services</h2><p class="page-sub">Manage services</p><div id="svcMsg"></div>'
+      +'<table class="tbl"><thead><tr><th>Service</th><th>Status</th><th>Actions</th></tr></thead><tbody>'
+      +s.map(function(x){
+        return '<tr><td><strong>'+x.name+'</strong></td>'
+          +'<td><span class="badge '+(x.active?'badge-on':'badge-off')+'">'+(x.active?'Running':'Stopped')+'</span></td>'
+          +'<td><button class="btn btn-s btn-sm" data-svc="'+x.name+'" data-act="start" onclick="svcAct(this)">Start</button> '
+          +'<button class="btn btn-d btn-sm" data-svc="'+x.name+'" data-act="stop" onclick="svcAct(this)">Stop</button> '
+          +'<button class="btn btn-w btn-sm" data-svc="'+x.name+'" data-act="restart" onclick="svcAct(this)">Restart</button></td></tr>';
+      }).join('')+'</tbody></table>';
+  });
+}
+window.svcAct = function(btn) {
+  var n=btn.dataset.svc, a=btn.dataset.act;
+  api.post('/api/services/'+n+'/'+a).then(function(r) {
+    $('svcMsg').innerHTML = r.success?'<div class="alert alert-ok">'+n+' '+a+'ed</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    setTimeout(function(){loadPage('services')},1200);
+  });
+};
+
+function pgFiles(el, p) {
+  if (p !== undefined) curPath = p;
+  api.get('/api/files?path='+encodeURIComponent(curPath)).then(function(d) {
+    if (d.error) { el.innerHTML='<div class="alert alert-err">'+esc(d.error)+'</div>'; return; }
+    if (d.binary) {
+      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
+      el.innerHTML='<h2 class="page-title">📄 Binary File</h2><p class="page-sub">'+esc(d.path)+'</p>'
+        +'<div class="card"><p>Binary file ('+fmtB(d.size)+') — cannot edit</p>'
+        +'<div class="mt"><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p" target="_blank">Download</a> '
+        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
+      return;
+    }
+    if (d.tooLarge) {
+      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
+      el.innerHTML='<h2 class="page-title">📄 Large File</h2><p class="page-sub">'+esc(d.path)+'</p>'
+        +'<div class="card"><p>File too large to edit ('+fmtB(d.size)+')</p>'
+        +'<div class="mt"><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p" target="_blank">Download</a> '
+        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
+      return;
+    }
+    if (d.content !== undefined) {
+      editFile = d.path;
+      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
+      el.innerHTML='<h2 class="page-title">📝 Edit</h2><p class="page-sub">'+esc(d.path)+' ('+fmtB(d.size)+')</p><div id="fMsg"></div>'
+        +'<textarea class="form-control" id="fContent">'+esc(d.content)+'</textarea>'
+        +'<div class="mt"><button class="btn btn-p" onclick="saveFile()">💾 Save</button> '
+        +'<a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-w" target="_blank">Download</a> '
+        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div>';
+      return;
+    }
+    var parts=curPath.split('/').filter(Boolean);
+    var bc='<a data-nav="/" onclick="navF(this)">root</a>', bp='';
+    parts.forEach(function(x){ bp+='/'+x; bc+=' <span>/</span> <a data-nav="'+encodeURIComponent(bp)+'" onclick="navF(this)">'+esc(x)+'</a>'; });
+    var items=(d.items||[]).sort(function(a,b){ return a.isDir===b.isDir?a.name.localeCompare(b.name):(a.isDir?-1:1); });
+    var parent=curPath==='/'?'':(curPath.split('/').slice(0,-1).join('/')||'/');
+    var html='<h2 class="page-title">📁 File Manager</h2><div class="breadcrumb">'+bc+'</div><div id="fMsg"></div>'
+      +'<div class="mb"><button class="btn btn-p" onclick="uploadF()">📤 Upload</button> <button class="btn btn-s" onclick="mkdirF()">📁 New Folder</button></div><div>';
+    if (parent) html+='<div class="file-item" data-nav="'+encodeURIComponent(parent)+'" ondblclick="navF(this)"><span class="icon">📁</span><span class="name">..</span><span class="size"></span></div>';
+    items.forEach(function(i){
+      var fp=(curPath==='/'?'':curPath)+'/'+i.name, enc=encodeURIComponent(fp);
+      html+='<div class="file-item" data-nav="'+enc+'" ondblclick="navF(this)">'
+        +'<span class="icon">'+(i.isDir?'📁':'📄')+'</span><span class="name">'+esc(i.name)+'</span>'
+        +(i.perms?'<span class="perms">'+i.perms+'</span>':'')
+        +'<span class="size">'+(i.isDir?'':fmtB(i.size))+'</span>'
+        +'<div class="file-actions">'
+        +(!i.isDir?'<a href="/api/files/download?path='+enc+'" class="btn btn-p btn-sm" target="_blank" onclick="event.stopPropagation()">⬇</a> ':'')
+        +'<button class="btn btn-w btn-sm" data-rn="'+enc+'" onclick="event.stopPropagation();renF(this)">✏️</button> '
+        +'<button class="btn btn-d btn-sm" data-del="'+enc+'" onclick="event.stopPropagation();delF(this)">🗑</button>'
+        +'</div></div>';
+    });
+    el.innerHTML=html+'</div>';
+  });
+}
+window.navF = function(el) { var p=el.dataset?el.dataset.nav:el.getAttribute('data-nav'); if(p)pgFiles($('content'),decodeURIComponent(p)); };
+window.saveFile = function() {
+  api.put('/api/files',{filePath:editFile,content:$('fContent').value}).then(function(r){
+    $('fMsg').innerHTML=r.success?'<div class="alert alert-ok">Saved!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+  });
+};
+window.delF = function(btn) { var p=decodeURIComponent(btn.dataset.del); if(confirm('Delete '+p+'?'))api.del('/api/files?path='+encodeURIComponent(p)).then(function(){pgFiles($('content'))}); };
+window.renF = function(btn) {
+  var old=decodeURIComponent(btn.dataset.rn), nm=old.split('/').pop(), nn=prompt('Rename to:',nm);
+  if(nn&&nn!==nm){ var dir=old.substring(0,old.lastIndexOf('/')); api.post('/api/files/rename',{oldPath:old,newPath:dir+'/'+nn}).then(function(r){if(r.success)pgFiles($('content'));else alert('Error: '+(r.error||''));}); }
+};
+window.uploadF = function() {
+  var inp=document.createElement('input'); inp.type='file';
+  inp.onchange=function(){ var fd=new FormData(); fd.append('file',inp.files[0]); fd.append('path',curPath); api.req('/api/files/upload',{method:'POST',body:fd}).then(function(){pgFiles($('content'))}); };
+  inp.click();
+};
+window.mkdirF = function() { var n=prompt('Folder name:'); if(n)api.post('/api/files/mkdir',{path:curPath+'/'+n}).then(function(){pgFiles($('content'))}); };
+
+function pgDom(el) {
+  api.get('/api/domains').then(function(d) {
+    el.innerHTML='<h2 class="page-title">🌐 Domains</h2><p class="page-sub">Virtual host management</p><div id="domMsg"></div>'
+      +'<div class="flex-row"><input type="text" id="newDom" class="form-control" placeholder="example.com" style="max-width:300px"><button class="btn btn-p" onclick="addDom()">Add Domain</button></div>'
+      +'<table class="tbl"><thead><tr><th>Domain</th><th>Document Root</th><th>Actions</th></tr></thead><tbody>'
+      +d.map(function(x){
+        return '<tr><td><strong>'+esc(x.name)+'</strong></td><td><code>'+esc(x.docRoot)+'</code></td>'
+          +'<td><button class="btn btn-p btn-sm" data-nav="'+encodeURIComponent(x.docRoot)+'" onclick="navF(this);loadPage(\'files\')">Files</button> '
+          +'<button class="btn btn-d btn-sm" data-dom="'+esc(x.name)+'" onclick="delDom(this)">Delete</button></td></tr>';
+      }).join('')+(d.length===0?'<tr><td colspan="3" style="text-align:center;color:#8a8d93">No domains yet</td></tr>':'')
+      +'</tbody></table>';
+  });
+}
+window.addDom=function(){
+  var domain=$('newDom').value.trim(); if(!domain)return;
+  api.post('/api/domains',{domain:domain}).then(function(r){
+    $('domMsg').innerHTML=r.success?'<div class="alert alert-ok">Domain added!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('domains')},1200);
+  });
+};
+window.delDom=function(btn){ var n=btn.dataset.dom; if(confirm('Delete domain '+n+'?'))api.del('/api/domains/'+n).then(function(){loadPage('domains')}); };
+
+/* ===== CLOUDFLARE MANAGEMENT UI ===== */
+function pgCloudflare(el) {
+  api.get('/api/cloudflare/config').then(function(cfg) {
+    if (!cfg.configured) {
+      // Tampilkan halaman setup API
+      el.innerHTML = '<h2 class="page-title">☁️ Cloudflare Management</h2>'
+        + '<p class="page-sub">Multi-domain management via Cloudflare API</p>'
+        + '<div id="cfMsg"></div>'
+        + '<div class="card">'
+        + '<h3 class="mb">Setup Cloudflare API</h3>'
+        + '<p style="color:#8a8d93;margin-bottom:20px;font-size:14px">'
+        + '1. Go to <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" style="color:#4f8cff">Cloudflare API Tokens</a><br>'
+        + '2. Create a Global API token with "Zone:Zone & Zone:DNS" permissions<br>'
+        + '3. Copy token and paste below</p>'
+        + '<div class="flex-row"><input id="cfToken" class="form-control" placeholder="API token..." style="flex:1">'
+        + '<input id="cfEmail" class="form-control" placeholder="Email address (optional)"></div>'
+        + '<button class="btn btn-p mt" onclick="cfSetupApi()">Configure API</button>'
+        + '</div>';
+      return;
+    }
+
+    // Tampilkan halaman manajemen domain
+    api.get('/api/cloudflare/zones').then(function(zones) {
+      var html = '<h2 class="page-title">☁️ Cloudflare Management</h2>'
+        + '<p class="page-sub">Account: ' + esc(cfg.accountName || 'Not configured') + ' (Token: ' + esc(cfg.tokenMask || 'None') + ')</p>'
+        + '<div id="cfMsg"></div>'
+        + '<div class="flex-row"><input type="text" id="newCfDomain" class="form-control" placeholder="example.com" style="max-width:300px">'
+        + '<div><label class="checkbox"><input type="checkbox" id="createVhost" checked> Create local vhost</label></div>'
+        + '<button class="btn btn-p" onclick="cfAddDomain()">Add Domain to Cloudflare</button></div>'
+        + '<table class="tbl"><thead><tr><th>Domain</th><th>Status</th><th>Name Servers</th><th>Actions</th></tr></thead><tbody>';
+
+      if (zones.length === 0) {
+        html += '<tr><td colspan="4" style="text-align:center;color:#8a8d93">No domains found in Cloudflare</td></tr>';
+      } else {
+        zones.forEach(function(zone) {
+          html += '<tr>'
+            + '<td><strong>' + esc(zone.name) + '</strong></td>'
+            + '<td><span class="badge ' + (zone.status === 'active' ? 'badge-on' : 'badge-off') + '">' + esc(zone.status) + '</span></td>'
+            + '<td><small style="font-size:12px;color:#8a8d93">' + esc(zone.nameServers ? zone.nameServers.join(', ') : 'None') + '</small></td>'
+            + '<td>'
+            + '<button class="btn btn-p btn-sm" data-zone="' + esc(zone.id) + '" data-domain="' + esc(zone.name) + '" onclick="cfManageDNS(this)">DNS</button> '
+            + '<button class="btn btn-s btn-sm" data-zone="' + esc(zone.id) + '" data-domain="' + esc(zone.name) + '" onclick="cfCreateVhost(this)">Create Vhost</button> '
+            + '<button class="btn btn-d btn-sm" data-zone="' + esc(zone.id) + '" data-domain="' + esc(zone.name) + '" onclick="cfDeleteDomain(this)">Delete</button>'
+            + '</td></tr>';
+        });
+      }
+      
+      html += '</tbody></table>'
+        + '<div class="mt"><button class="btn btn-w" onclick="cfResetApi()">Reset API Configuration</button></div>';
+      el.innerHTML = html;
+    }).catch(function(err) {
+      el.innerHTML = '<h2 class="page-title">☁️ Cloudflare Management</h2>'
+        + '<div class="alert alert-err">' + esc(err.message || 'Failed to load domains') + '</div>'
+        + '<div class="card">'
+        + '<h3>Reset API Configuration</h3>'
+        + '<p>If you\'re having issues with the Cloudflare integration, you can reset the API configuration.</p>'
+        + '<button class="btn btn-w mt" onclick="cfResetApi()">Reset API Configuration</button>'
+        + '</div>';
+    });
+  });
+}
+
+// Setup Cloudflare API
+window.cfSetupApi = function() {
+  var token = $('cfToken').value.trim();
+  var email = $('cfEmail') ? $('cfEmail').value.trim() : '';
+  
+  if (!token) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">API token required</div>';
+    return;
+  }
+  
+  api.post('/api/cloudflare/config', { token: token, email: email }).then(function(res) {
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">Cloudflare API configured successfully!</div>';
+    setTimeout(function() {
+      loadPage('cloudflare');
+    }, 1200);
+  }).catch(function(err) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to configure API') + '</div>';
+  });
+};
+
+// Reset Cloudflare API
+window.cfResetApi = function() {
+  if (!confirm('Reset Cloudflare API configuration? This will remove your API token.')) return;
+  
+  api.post('/api/cloudflare/config', { token: '', email: '' }).then(function() {
+    loadPage('cloudflare');
+  }).catch(function(err) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to reset configuration') + '</div>';
+  });
+};
+
+// Add domain to Cloudflare
+window.cfAddDomain = function() {
+  var domain = $('newCfDomain').value.trim();
+  var createVhost = $('createVhost') ? $('createVhost').checked : true;
+  
+  if (!domain) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">Domain name required</div>';
+    return;
+  }
+  
+  api.post('/api/cloudflare/zones', { domain: domain, createVhost: createVhost }).then(function(res) {
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">Domain added to Cloudflare!</div>';
+    setTimeout(function() {
+      loadPage('cloudflare');
+    }, 1200);
+  }).catch(function(err) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to add domain') + '</div>';
+  });
+};
+
+// Delete domain from Cloudflare
+window.cfDeleteDomain = function(btn) {
+  var zoneId = btn.dataset.zone;
+  var domain = btn.dataset.domain;
+  
+  if (!confirm('Delete domain ' + domain + ' from Cloudflare? This will also remove any DNS records.')) return;
+  
+  api.del('/api/cloudflare/zones/' + zoneId).then(function(res) {
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">Domain deleted from Cloudflare!</div>';
+    setTimeout(function() {
+      loadPage('cloudflare');
+    }, 1200);
+  }).catch(function(err) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to delete domain') + '</div>';
+  });
+};
+
+// Create local vhost for Cloudflare domain
+window.cfCreateVhost = function(btn) {
+  var domain = btn.dataset.domain;
+  
+  api.post('/api/domains', { domain: domain }).then(function(res) {
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">Virtual host created for ' + domain + '!</div>';
+  }).catch(function(err) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to create vhost') + '</div>';
+  });
+};
+
+// Manage DNS records
+window.cfManageDNS = function(btn) {
+  var zoneId = btn.dataset.zone;
+  var domain = btn.dataset.domain;
+  var el = $('content');
+  
+  el.innerHTML = '<h2 class="page-title">DNS Records: ' + esc(domain) + '</h2>'
+    + '<p class="page-sub">Manage DNS records for this domain</p>'
+    + '<div id="cfMsg"></div>'
+    + '<div class="mb"><button class="btn btn-s" onclick="loadPage(\'cloudflare\')">Back to Domains</button></div>'
+    + '<div class="card mb" style="text-align:center;padding:30px;"><span class="spinner">Loading DNS records...</span></div>';
+  
+  api.get('/api/cloudflare/zones/' + zoneId + '/dns').then(function(records) {
+    var html = '<div class="flex-row mb">'
+      + '<button class="btn btn-p" onclick="cfAddDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(domain) + '\')">Add DNS Record</button></div>'
+      + '<table class="tbl"><thead><tr><th>Type</th><th>Name</th><th>Content</th><th>TTL</th><th>Actions</th></tr></thead><tbody>';
+    
+    if (!records || records.length === 0) {
+      html += '<tr><td colspan="5" style="text-align:center;color:#8a8d93">No DNS records found</td></tr>';
+    } else {
+      records.forEach(function(rec) {
+        // Make name relative to domain if possible
+        let displayName = rec.name;
+        if (displayName === domain) {
+          displayName = '@';
+        } else if (displayName.endsWith('.' + domain)) {
+          displayName = displayName.substring(0, displayName.length - domain.length - 1);
+        }
+        
+        html += '<tr>'
+          + '<td>' + esc(rec.type) + '</td>'
+          + '<td>' + esc(displayName) + '</td>'
+          + '<td>' + esc(rec.content || (rec.type === 'MX' ? 'Priority: '+rec.priority : '')) + '</td>'
+          + '<td>' + (rec.ttl === 1 ? 'Auto' : rec.ttl) + '</td>'
+          + '<td>'
+          + '<button class="btn btn-w btn-sm" onclick="cfEditDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(rec.id) + '\', \'' + esc(domain) + '\', ' + JSON.stringify(rec).replace(/"/g, '&quot;') + ')">Edit</button> '
+          + '<button class="btn btn-d btn-sm" onclick="cfDeleteDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(rec.id) + '\', \'' + esc(domain) + '\')">Delete</button>'
+          + '</td></tr>';
+      });
+    }
+    
+    html += '</tbody></table>';
+    
+    el.innerHTML = '<h2 class="page-title">DNS Records: ' + esc(domain) + '</h2>'
+      + '<p class="page-sub">Manage DNS records for this domain</p>'
+      + '<div id="cfMsg"></div>'
+      + '<div class="mb"><button class="btn btn-s" onclick="loadPage(\'cloudflare\')">Back to Domains</button></div>'
+      + html;
+  }).catch(function(err) {
+    el.innerHTML = '<h2 class="page-title">DNS Records: ' + esc(domain) + '</h2>'
+      + '<div class="alert alert-err">' + esc(err.message || 'Failed to load DNS records') + '</div>'
+      + '<div class="mb"><button class="btn btn-s" onclick="loadPage(\'cloudflare\')">Back to Domains</button></div>';
+  });
+};
+
+// Add DNS record
+window.cfAddDnsRecord = function(zoneId, domain) {
+  // Create modal
+  var modalHtml = '<div class="modal" id="dnsModal">'
+    + '<div class="modal-content">'
+    + '<h3 class="modal-title">Add DNS Record</h3>'
+    + '<div class="mb"><label>Type</label><select id="dnsType" class="form-control" onchange="cfUpdateDnsForm()">'
+    + '<option value="A">A (IPv4 Address)</option>'
+    + '<option value="AAAA">AAAA (IPv6 Address)</option>'
+    + '<option value="CNAME">CNAME (Alias)</option>'
+    + '<option value="TXT">TXT (Text)</option>'
+    + '<option value="MX">MX (Mail)</option>'
+    + '</select></div>'
+    + '<div class="mb"><label>Name</label><input id="dnsName" class="form-control" placeholder="e.g., www or @ for root"></div>'
+    + '<div class="mb" id="dnsContentField"><label>Content</label><input id="dnsContent" class="form-control" placeholder="e.g., 192.168.1.1"></div>'
+    + '<div class="mb" id="dnsPriorityField" style="display:none"><label>Priority</label><input type="number" id="dnsPriority" class="form-control" value="10"></div>'
+    + '<div class="mb"><label>TTL</label><select id="dnsTtl" class="form-control">'
+    + '<option value="1">Auto</option>'
+    + '<option value="60">1 minute</option>'
+    + '<option value="300">5 minutes</option>'
+    + '<option value="1800">30 minutes</option>'
+    + '<option value="3600">1 hour</option>'
+    + '<option value="86400">1 day</option>'
+    + '</select></div>'
+    + '<div id="dnsFormMsg"></div>'
+    + '<div class="modal-footer">'
+    + '<button class="btn btn-p" onclick="cfSubmitDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(domain) + '\')">Add Record</button> '
+    + '<button class="btn btn-s" onclick="document.getElementById(\'dnsModal\').remove()">Cancel</button>'
+    + '</div></div></div>';
+  
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+// Update DNS form based on type
+window.cfUpdateDnsForm = function() {
+  var type = $('dnsType').value;
+  
+  if (type === 'MX') {
+    $('dnsPriorityField').style.display = 'block';
+  } else {
+    $('dnsPriorityField').style.display = 'none';
+  }
+};
+
+// Submit DNS record
+window.cfSubmitDnsRecord = function(zoneId, domain) {
+  var type = $('dnsType').value;
+  var name = $('dnsName').value.trim();
+  var content = $('dnsContent').value.trim();
+  var ttl = parseInt($('dnsTtl').value);
+  
+  if (!name) {
+    $('dnsFormMsg').innerHTML = '<div class="alert alert-err">Name is required</div>';
+    return;
+  }
+  
+  if (type !== 'MX' && !content) {
+    $('dnsFormMsg').innerHTML = '<div class="alert alert-err">Content is required</div>';
+    return;
+  }
+  
+  // Format name field
+  if (name === '@') {
+    name = domain;
+  } else if (!name.endsWith('.' + domain) && !name.includes('.')) {
+    name = name + '.' + domain;
+  }
+  
+  var record = {
+    type: type,
+    name: name,
+    content: content,
+    ttl: ttl
+  };
+  
+  // Add priority for MX records
+  if (type === 'MX' && $('dnsPriority')) {
+    record.priority = parseInt($('dnsPriority').value) || 10;
+  }
+  
+  api.post('/api/cloudflare/zones/' + zoneId + '/dns', record).then(function(res) {
+    document.getElementById('dnsModal').remove();
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">DNS record added!</div>';
+    setTimeout(function() {
+      cfManageDNS({dataset: {zone: zoneId, domain: domain}});
+    }, 1000);
+  }).catch(function(err) {
+    $('dnsFormMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to add record') + '</div>';
+  });
+};
+
+// Edit DNS record
+window.cfEditDnsRecord = function(zoneId, recordId, domain, record) {
+  // Create modal with record data
+  var modalHtml = '<div class="modal" id="dnsEditModal">'
+    + '<div class="modal-content">'
+    + '<h3 class="modal-title">Edit DNS Record</h3>'
+    + '<div class="mb"><label>Type</label><input class="form-control" value="' + esc(record.type) + '" disabled></div>';
+    
+  // Format name for display
+  let displayName = record.name;
+  if (displayName === domain) {
+    displayName = '@';
+  } else if (displayName.endsWith('.' + domain)) {
+    displayName = displayName.substring(0, displayName.length - domain.length - 1);
+  }
+  
+  modalHtml += '<div class="mb"><label>Name</label><input id="editDnsName" class="form-control" value="' + esc(displayName) + '"></div>';
+    
+  // Content field for non-MX types
+  if (record.type !== 'MX') {
+    modalHtml += '<div class="mb"><label>Content</label><input id="editDnsContent" class="form-control" value="' + esc(record.content || '') + '"></div>';
+  } else {
+    modalHtml += '<div class="mb"><label>Content</label><input id="editDnsContent" class="form-control" value="' + esc(record.content || '') + '" placeholder="Mail server hostname"></div>'
+      + '<div class="mb"><label>Priority</label><input type="number" id="editDnsPriority" class="form-control" value="' + (record.priority || 10) + '"></div>';
+  }
+    
+  modalHtml += '<div class="mb"><label>TTL</label><select id="editDnsTtl" class="form-control">'
+    + '<option value="1" ' + (record.ttl === 1 ? 'selected' : '') + '>Auto</option>'
+    + '<option value="60" ' + (record.ttl === 60 ? 'selected' : '') + '>1 minute</option>'
+    + '<option value="300" ' + (record.ttl === 300 ? 'selected' : '') + '>5 minutes</option>'
+    + '<option value="1800" ' + (record.ttl === 1800 ? 'selected' : '') + '>30 minutes</option>'
+    + '<option value="3600" ' + (record.ttl === 3600 ? 'selected' : '') + '>1 hour</option>'
+    + '<option value="86400" ' + (record.ttl === 86400 ? 'selected' : '') + '>1 day</option>'
+    + '</select></div>'
+    + '<div id="dnsEditFormMsg"></div>'
+    + '<div class="modal-footer">'
+    + '<button class="btn btn-p" onclick="cfUpdateDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(recordId) + '\', \'' + esc(domain) + '\', \'' + esc(record.type) + '\')">Update Record</button> '
+    + '<button class="btn btn-s" onclick="document.getElementById(\'dnsEditModal\').remove()">Cancel</button>'
+    + '</div></div></div>';
+  
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+};
+
+// Update DNS record
+window.cfUpdateDnsRecord = function(zoneId, recordId, domain, type) {
+  var name = $('editDnsName').value.trim();
+  var content = $('editDnsContent') ? $('editDnsContent').value.trim() : '';
+  var ttl = parseInt($('editDnsTtl').value);
+  
+  if (!name) {
+    $('dnsEditFormMsg').innerHTML = '<div class="alert alert-err">Name is required</div>';
+    return;
+  }
+  
+  if (type !== 'MX' && !content) {
+    $('dnsEditFormMsg').innerHTML = '<div class="alert alert-err">Content is required</div>';
+    return;
+  }
+  
+  // Format name field
+  if (name === '@') {
+    name = domain;
+  } else if (!name.endsWith('.' + domain) && !name.includes('.')) {
+    name = name + '.' + domain;
+  }
+  
+  var record = {
+    type: type,
+    name: name,
+    content: content,
+    ttl: ttl
+  };
+  
+  // Add priority for MX records
+  if (type === 'MX' && $('editDnsPriority')) {
+    record.priority = parseInt($('editDnsPriority').value) || 10;
+  }
+  
+  api.put('/api/cloudflare/zones/' + zoneId + '/dns/' + recordId, record).then(function(res) {
+    document.getElementById('dnsEditModal').remove();
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">DNS record updated!</div>';
+    setTimeout(function() {
+      cfManageDNS({dataset: {zone: zoneId, domain: domain}});
+    }, 1000);
+  }).catch(function(err) {
+    $('dnsEditFormMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to update record') + '</div>';
+  });
+};
+
+// Delete DNS record
+window.cfDeleteDnsRecord = function(zoneId, recordId, domain) {
+  if (!confirm('Delete this DNS record?')) return;
+  
+  api.del('/api/cloudflare/zones/' + zoneId + '/dns/' + recordId).then(function(res) {
+    $('cfMsg').innerHTML = '<div class="alert alert-ok">DNS record deleted!</div>';
+    setTimeout(function() {
+      cfManageDNS({dataset: {zone: zoneId, domain: domain}});
+    }, 1000);
+  }).catch(function(err) {
+    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to delete record') + '</div>';
+  });
+};
+
+function pgDb(el) {
+  Promise.all([api.get('/api/databases'),api.get('/api/dashboard')]).then(function(res){
+    var d=res[0],info=res[1];
+    el.innerHTML='<h2 class="page-title">🗃️ Databases</h2><p class="page-sub">MariaDB management</p><div id="dbMsg"></div>'
+      +'<div class="flex-row">'
+      +'<div><label style="font-size:12px;color:#8a8d93">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
+      +'<div><label style="font-size:12px;color:#8a8d93">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
+      +'<div><label style="font-size:12px;color:#8a8d93">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
+      +'<button class="btn btn-p" onclick="addDb()">Create</button></div>'
+      +'<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
+      +(Array.isArray(d)?d:[]).map(function(x){return '<tr><td><strong>'+esc(x)+'</strong></td><td><button class="btn btn-d btn-sm" data-db="'+esc(x)+'" onclick="dropDb(this)">Drop</button></td></tr>';}).join('')
+      +'</tbody></table><div class="mt"><a href="http://'+info.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w">Open phpMyAdmin</a></div>';
+  });
+}
+window.addDb=function(){
+  api.post('/api/databases',{name:$('dbName').value,user:$('dbUser').value,password:$('dbPass').value}).then(function(r){
+    $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok">Created!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('databases')},1000);
+  });
+};
+window.dropDb=function(btn){ var n=btn.dataset.db; if(confirm('DROP '+n+'?'))api.del('/api/databases/'+n).then(function(){loadPage('databases')}); };
+
+function pgTun(el) {
+  api.get('/api/tunnel/status').then(function(s){
+    el.innerHTML='<h2 class="page-title">☁️ Cloudflare Tunnel</h2><p class="page-sub">Secure tunnel</p><div id="tunMsg"></div>'
+      +'<div class="card mb"><div class="label">Status</div><span class="badge '+(s.active?'badge-on':'badge-off')+'">'+(s.active?'Connected':'Not Connected')+'</span></div>'
+      +'<div class="card"><h3 class="mb">Setup Tunnel</h3>'
+      +'<p style="color:#8a8d93;margin-bottom:15px;font-size:14px">1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:#4f8cff">Cloudflare Zero Trust</a><br>2. Create a Tunnel → copy token<br>3. Paste below</p>'
+      +'<div class="flex-row"><input id="tunToken" class="form-control" placeholder="Tunnel token..." style="flex:1"><button class="btn btn-p" onclick="setTun()">Connect</button></div></div>';
+  });
+}
+window.setTun=function(){
+  api.post('/api/tunnel/setup',{token:$('tunToken').value.trim()}).then(function(r){
+    $('tunMsg').innerHTML=r.success?'<div class="alert alert-ok">Connected!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('tunnel')},2000);
+  });
+};
+
+function pgTerm(el) {
+  el.innerHTML='<h2 class="page-title">💻 Terminal</h2><p class="page-sub">Run commands</p>'
+    +'<div class="terminal-box" id="termOut">$ </div>'
+    +'<div class="term-input"><input id="termIn" placeholder="Type command..." onkeydown="if(event.key===\'Enter\')runCmd()"><button class="btn btn-p" onclick="runCmd()">Run</button></div>';
+  $('termIn').focus();
+}
+window.runCmd=function(){
+  var cmd=$('termIn').value.trim(); if(!cmd)return;
+  var out=$('termOut'); out.textContent+=cmd+'\n'; $('termIn').value='';
+  api.post('/api/terminal',{command:cmd}).then(function(r){ out.textContent+=(r.output||'')+'\n$ '; out.scrollTop=out.scrollHeight; });
+};
+
+function pgSet(el) {
+  el.innerHTML='<h2 class="page-title">🔧 Settings</h2><p class="page-sub">Panel configuration</p><div id="setMsg"></div>'
+    +'<div class="card" style="max-width:400px"><h3 class="mb">Change Password</h3>'
+    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">Current Password</label><input type="password" id="curPass" class="form-control"></div>'
+    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">New Password</label><input type="password" id="newPass" class="form-control"></div>'
+    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">Confirm Password</label><input type="password" id="cfmPass" class="form-control"></div>'
+    +'<button class="btn btn-p" onclick="chgPass()">Update Password</button></div>';
+}
+window.chgPass=function(){
+  var np=$('newPass').value,cp=$('cfmPass').value;
+  if(np!==cp){$('setMsg').innerHTML='<div class="alert alert-err">Passwords don\'t match</div>';return;}
+  if(np.length<6){$('setMsg').innerHTML='<div class="alert alert-err">Min 6 characters</div>';return;}
+  api.post('/api/settings/password',{currentPassword:$('curPass').value,newPassword:np}).then(function(r){
+    $('setMsg').innerHTML=r.success?'<div class="alert alert-ok">Updated!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+  });
+};
+
+checkAuth();
+JSEOF
+
+log "LitePanel app created"
+
+########################################
+step "Step 7/10: Install phpMyAdmin"
+########################################
+PMA_DIR="/usr/local/lsws/Example/html/phpmyadmin"
+mkdir -p ${PMA_DIR}
+cd /tmp
+log "Downloading phpMyAdmin..."
+wget "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null
+if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
+  tar xzf pma.tar.gz
+  cp -rf phpMyAdmin-*/* ${PMA_DIR}/
+  rm -rf phpMyAdmin-* pma.tar.gz
+
+  # Generate stronger blowfish secret (32 bytes)
+  BLOWFISH=$(openssl rand -hex 32)
+  cat > ${PMA_DIR}/config.inc.php <<PMAEOF
+<?php
+\$cfg['blowfish_secret'] = '${BLOWFISH}';
+\$i = 0;
+\$i++;
+\$cfg['Servers'][\$i]['host'] = 'localhost';
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['Servers'][\$i]['socket'] = '/var/run/mysqld/mysqld.sock';
+\$cfg['TempDir'] = '/tmp';
+\$cfg['UploadDir'] = '';
+\$cfg['SaveDir'] = '';
+PMAEOF
+  
+  # Set proper permissions
+  chown -R nobody:nogroup ${PMA_DIR}
+  chmod 755 ${PMA_DIR}
+  
+  # Create tmp directory for phpMyAdmin
+  mkdir -p ${PMA_DIR}/tmp
+  chown nobody:nogroup ${PMA_DIR}/tmp
+  chmod 755 ${PMA_DIR}/tmp
+  
+  log "phpMyAdmin installed"
+else
+  err "phpMyAdmin download failed"
+fi
+
+########################################
+# Step 7.5: Configure OpenLiteSpeed for phpMyAdmin
+########################################
+log "Configuring OpenLiteSpeed for phpMyAdmin access..."
+
+# Define OpenLiteSpeed config path
+OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
+
+# Check if config exists
+if [ ! -f "$OLS_CONF" ]; then
+    log "ERROR: OpenLiteSpeed config not found at $OLS_CONF"
+    exit 1
+fi
+
+# Backup original config
+cp "$OLS_CONF" "$OLS_CONF.backup.$(date +%Y%m%d_%H%M%S)"
+
+# Ensure Example virtualhost exists and configured properly
+if ! grep -q "virtualhost Example" "$OLS_CONF"; then
+    log "Adding Example virtualhost configuration..."
+    cat >> "$OLS_CONF" << 'EOF'
+
+virtualhost Example {
+  vhRoot                  /usr/local/lsws/Example/
+  configFile              $SERVER_ROOT/conf/vhosts/$VH_NAME/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              0
+  setUIDMode              0
+}
+EOF
+else
+    # Update existing config to enable script
+    sed -i '/virtualhost Example {/,/^}/ s/enableScript.*/enableScript            1/' "$OLS_CONF"
+    sed -i '/virtualhost Example {/,/^}/ s/restrained.*/restrained              0/' "$OLS_CONF"
+fi
+
+# Ensure PHP extprocessor exists
+if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
+    log "Adding PHP processor configuration..."
+    # Find insertion point before first virtualhost
+    LINE=$(grep -n "virtualhost" "$OLS_CONF" | head -1 | cut -d: -f1)
+    if [ -n "$LINE" ]; then
+        sed -i "${LINE}i\\
+extprocessor lsphp81 {\\
+  type                    lsapi\\
+  address                 uds://tmp/lshttpd/lsphp.sock\\
+  maxConns                10\\
+  env                     PHP_LSAPI_CHILDREN=10\\
+  initTimeout             60\\
+  retryTimeout            0\\
+  respBuffer              0\\
+  autoStart               2\\
+  path                    /usr/local/lsws/lsphp81/bin/lsphp\\
+  backlog                 100\\
+  instances               1\\
+  memSoftLimit            2047M\\
+  memHardLimit            2047M\\
+}\\
+" "$OLS_CONF"
+    fi
+fi
+
+# Create/Update Example vhost config directory
+mkdir -p /usr/local/lsws/conf/vhosts/Example
+mkdir -p /usr/local/lsws/Example/logs
+
+# Update Example vhost config with proper PHP handler
+cat > /usr/local/lsws/conf/vhosts/Example/vhconf.conf << 'EOF'
+docRoot                   $VH_ROOT/html
+vhDomain                  *
 enableGzip                1
 
 index {
@@ -790,1747 +2205,84 @@ index {
   autoIndex               0
 }
 
-scripthandler {
-  add                     lsapi:lsphp81 php
-}
-
-rewrite {
-  enable                  1
-  autoLoadHtaccess        1
-}`;
-
-    await fs.writeFile(path.join(confDir, 'vhconf.conf'), vhConf);
-    await fs.writeFile(path.join(docRoot, 'index.html'), 
-      `<!DOCTYPE html><html><head><title>${domain}</title></head>
-      <body><h1>Welcome to ${domain}</h1><p>Powered by LitePanel Pro</p></body></html>`);
-
-    execSync(`chown -R nobody:nogroup ${path.join(OLS_VHOST_DIR, domain)}`);
-    
-    return docRoot;
-  }
-
-  async addDomainToOLS(domain) {
-    let config = await fs.readFile(OLS_CONF, 'utf8');
-    
-    // Add virtualhost
-    config += `\nvirtualhost ${domain} {
-  vhRoot                  ${OLS_VHOST_DIR}/${domain}
-  configFile              ${OLS_VHOST_CONF_DIR}/${domain}/vhconf.conf
-  allowSymbolLink         1
-  enableScript            1
-  restrained              1
-}\n`;
-
-    // Add listener mapping
-    const listenerRegex = /(listener\s+HTTP\s*\{[\s\S]*?)(})/;
-    if (listenerRegex.test(config)) {
-      config = config.replace(listenerRegex,
-        `$1  map                     ${domain} ${domain}, www.${domain}\n$2`);
-    }
-
-    await fs.writeFile(OLS_CONF, config);
-  }
-
-  async removeDomainFromOLS(domain) {
-    let config = await fs.readFile(OLS_CONF, 'utf8');
-    
-    // Remove virtualhost
-    const vhRegex = new RegExp(`\\n?virtualhost\\s+${domain}\\s*\\{[\\s\\S]*?\\}`, 'g');
-    config = config.replace(vhRegex, '');
-    
-    // Remove mapping
-    const mapRegex = new RegExp(`^\\s*map\\s+${domain}\\s+.*$`, 'gm');
-    config = config.replace(mapRegex, '');
-    
-    await fs.writeFile(OLS_CONF, config);
-  }
-}
-
-module.exports = new DomainController();
-DOMEOF
-
-########################################
-# === src/controllers/file.controller.js ===
-########################################
-cat > src/controllers/file.controller.js <<'FILECEOF'
-const fs = require('fs').promises;
-const fsSync = require('fs');
-const path = require('path');
-const multer = require('multer');
-const archiver = require('archiver');
-const unzipper = require('unzipper');
-const mime = require('mime-types');
-const logger = require('../utils/logger');
-
-const upload = multer({ 
-  dest: '/tmp/uploads/',
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
-});
-
-class FileController {
-  constructor() {
-    this.allowedPaths = ['/usr/local/lsws/vhosts', '/opt/litepanel-pro'];
-    this.maxFileSize = 50 * 1024 * 1024; // 50MB for editing
-  }
-
-  validatePath(requestedPath) {
-    const resolvedPath = path.resolve(requestedPath);
-    const isAllowed = this.allowedPaths.some(allowed => 
-      resolvedPath.startsWith(allowed)
-    );
-
-    if (!isAllowed) {
-      throw new Error('Access denied');
-    }
-
-    return resolvedPath;
-  }
-
-  async list(req, res) {
-    try {
-      const targetPath = this.validatePath(req.query.path || '/usr/local/lsws/vhosts');
-      const stats = await fs.stat(targetPath);
-
-      if (!stats.isDirectory()) {
-        // Return file content for editing
-        if (stats.size > this.maxFileSize) {
-          return res.json({ path: targetPath, size: stats.size, tooLarge: true });
-        }
-
-        const content = await fs.readFile(targetPath, 'utf8');
-        return res.json({ path: targetPath, content, size: stats.size });
-      }
-
-      // List directory contents
-      const items = await fs.readdir(targetPath);
-      const detailed = [];
-
-      for (const item of items) {
-        try {
-          const itemPath = path.join(targetPath, item);
-          const itemStats = await fs.stat(itemPath);
-          
-          detailed.push({
-            name: item,
-            path: itemPath,
-            size: itemStats.size,
-            isDirectory: itemStats.isDirectory(),
-            isFile: itemStats.isFile(),
-            mimeType: itemStats.isDirectory() ? 'directory' : mime.lookup(itemPath) || 'application/octet-stream',
-            modified: itemStats.mtime,
-            permissions: '0' + (itemStats.mode & parseInt('777', 8)).toString(8)
-          });
-        } catch (e) {
-          detailed.push({
-            name: item,
-            path: path.join(targetPath, item),
-            error: true
-          });
-        }
-      }
-
-      res.json({ path: targetPath, items: detailed });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  async download(req, res) {
-    try {
-      const targetPath = this.validatePath(req.query.path);
-      const stats = await fs.stat(targetPath);
-
-      if (stats.isDirectory()) {
-        return res.status(400).json({ error: 'Cannot download directory' });
-      }
-
-      res.download(targetPath);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  upload = [
-    upload.single('file'),
-    async (req, res) => {
-      try {
-        const targetDir = this.validatePath(req.body.path || '/tmp');
-        const targetPath = path.join(targetDir, req.file.originalname);
-        
-        await fs.rename(req.file.path, targetPath);
-        res.json({ success: true, path: targetPath });
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    }
-  ];
-
-  async create(req, res) {
-    try {
-      const { path: filePath, type, content } = req.body;
-      const targetPath = this.validatePath(filePath);
-
-      if (type === 'directory') {
-        await fs.mkdir(targetPath, { recursive: true });
-      } else {
-        await fs.writeFile(targetPath, content || '');
-      }
-
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  async update(req, res) {
-    try {
-      const { path: filePath, content } = req.body;
-      const targetPath = this.validatePath(filePath);
-      
-      await fs.writeFile(targetPath, content);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  async remove(req, res) {
-    try {
-      const targetPath = this.validatePath(req.query.path);
-      
-      if (targetPath === '/' || this.allowedPaths.includes(targetPath)) {
-        return res.status(400).json({ error: 'Cannot delete root directories' });
-      }
-
-      await fs.rm(targetPath, { recursive: true, force: true });
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  async rename(req, res) {
-    try {
-      const { oldPath, newPath } = req.body;
-      const validOldPath = this.validatePath(oldPath);
-      const validNewPath = this.validatePath(newPath);
-      
-      await fs.rename(validOldPath, validNewPath);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  async extract(req, res) {
-    try {
-      const { archivePath, destPath } = req.body;
-      const validArchivePath = this.validatePath(archivePath);
-      const validDestPath = this.validatePath(destPath);
-
-      await fs.mkdir(validDestPath, { recursive: true });
-
-      await new Promise((resolve, reject) => {
-        fsSync.createReadStream(validArchivePath)
-          .pipe(unzipper.Extract({ path: validDestPath }))
-          .on('close', resolve)
-          .on('error', reject);
-      });
-
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-
-  async compress(req, res) {
-    try {
-      const { files, destPath, format = 'zip' } = req.body;
-      const validDestPath = this.validatePath(destPath);
-      
-      const output = fsSync.createWriteStream(validDestPath);
-      const archive = archiver(format, { zlib: { level: 9 } });
-
-      archive.pipe(output);
-
-      for (const file of files) {
-        const validPath = this.validatePath(file);
-        const stats = await fs.stat(validPath);
-        
-        if (stats.isDirectory()) {
-          archive.directory(validPath, path.basename(validPath));
-        } else {
-          archive.file(validPath, { name: path.basename(validPath) });
-        }
-      }
-
-      await archive.finalize();
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-}
-
-module.exports = new FileController();
-FILECEOF
-
-########################################
-# === src/controllers/cloudflare.controller.js ===
-########################################
-cat > src/controllers/cloudflare.controller.js <<'CFEOF'
-const axios = require('axios');
-const database = require('../utils/database');
-const logger = require('../utils/logger');
-
-class CloudflareController {
-  constructor() {
-    this.baseURL = 'https://api.cloudflare.com/client/v4';
-  }
-
-  async makeRequest(method, endpoint, data, apiToken) {
-    try {
-      const response = await axios({
-        method,
-        url: `${this.baseURL}${endpoint}`,
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json'
-        },
-        data
-      });
-      return response.data;
-    } catch (error) {
-      logger.error('Cloudflare API error:', error.response?.data || error.message);
-      throw error;
-    }
-  }
-
-  async listAccounts(req, res) {
-    try {
-      const accounts = await database.all(
-        'SELECT id, name, email, is_active, created_at FROM cloudflare_accounts'
-      );
-      res.json(accounts);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to list accounts' });
-    }
-  }
-
-  async addAccount(req, res) {
-    try {
-      const { name, email, apiToken } = req.body;
-      
-      // Verify token
-      const verification = await this.makeRequest('GET', '/user/tokens/verify', null, apiToken);
-      
-      if (!verification.success) {
-        return res.status(400).json({ error: 'Invalid API token' });
-      }
-
-      // Save account
-      const result = await database.run(
-        'INSERT INTO cloudflare_accounts (name, email, api_token) VALUES (?, ?, ?)',
-        [name, email, apiToken] // In production, encrypt the token
-      );
-
-      res.json({ success: true, id: result.id });
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to add account' });
-    }
-  }
-
-  async removeAccount(req, res) {
-    try {
-      await database.run('DELETE FROM cloudflare_accounts WHERE id = ?', [req.params.id]);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to remove account' });
-    }
-  }
-
-  async listZones(req, res) {
-    try {
-      const account = await database.get(
-        'SELECT api_token FROM cloudflare_accounts WHERE id = ?',
-        [req.params.accountId]
-      );
-
-      if (!account) {
-        return res.status(404).json({ error: 'Account not found' });
-      }
-
-      const result = await this.makeRequest('GET', '/zones', null, account.api_token);
-      res.json(result.result || []);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to list zones' });
-    }
-  }
-
-  async createZone(req, res) {
-    try {
-      const { name } = req.body;
-      const account = await database.get(
-        'SELECT api_token, account_id FROM cloudflare_accounts WHERE id = ?',
-        [req.params.accountId]
-      );
-
-      const result = await this.makeRequest('POST', '/zones', {
-        name,
-        account: { id: account.account_id },
-        jump_start: true
-      }, account.api_token);
-
-      if (result.success) {
-        // Update domain in database
-        await database.run(
-          'UPDATE domains SET cloudflare_zone_id = ? WHERE name = ?',
-          [result.result.id, name]
-        );
-      }
-
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to create zone' });
-    }
-  }
-
-  async listDNS(req, res) {
-    try {
-      const zone = await database.get(
-        'SELECT cf.api_token FROM domains d ' +
-        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
-        'WHERE d.cloudflare_zone_id = ?',
-        [req.params.zoneId]
-      );
-
-      const result = await this.makeRequest(
-        'GET', 
-        `/zones/${req.params.zoneId}/dns_records`, 
-        null, 
-        zone.api_token
-      );
-
-      res.json(result.result || []);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to list DNS records' });
-    }
-  }
-
-  async createDNS(req, res) {
-    try {
-      const { type, name, content, ttl = 1, proxied = false } = req.body;
-      const zone = await database.get(
-        'SELECT cf.api_token FROM domains d ' +
-        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
-        'WHERE d.cloudflare_zone_id = ?',
-        [req.params.zoneId]
-      );
-
-      const result = await this.makeRequest(
-        'POST',
-        `/zones/${req.params.zoneId}/dns_records`,
-        { type, name, content, ttl, proxied },
-        zone.api_token
-      );
-
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to create DNS record' });
-    }
-  }
-
-  async updateDNS(req, res) {
-    try {
-      const { type, name, content, ttl, proxied } = req.body;
-      const zone = await database.get(
-        'SELECT cf.api_token FROM domains d ' +
-        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
-        'WHERE d.cloudflare_zone_id = ?',
-        [req.params.zoneId]
-      );
-
-      const result = await this.makeRequest(
-        'PUT',
-        `/zones/${req.params.zoneId}/dns_records/${req.params.recordId}`,
-        { type, name, content, ttl, proxied },
-        zone.api_token
-      );
-
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to update DNS record' });
-    }
-  }
-
-  async deleteDNS(req, res) {
-    try {
-      const zone = await database.get(
-        'SELECT cf.api_token FROM domains d ' +
-        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
-        'WHERE d.cloudflare_zone_id = ?',
-        [req.params.zoneId]
-      );
-
-      const result = await this.makeRequest(
-        'DELETE',
-        `/zones/${req.params.zoneId}/dns_records/${req.params.recordId}`,
-        null,
-        zone.api_token
-      );
-
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to delete DNS record' });
-    }
-  }
-
-  async purgeCache(req, res) {
-    try {
-      const { files } = req.body;
-      const zone = await database.get(
-        'SELECT cf.api_token FROM domains d ' +
-        'JOIN cloudflare_accounts cf ON d.cloudflare_account_id = cf.id ' +
-        'WHERE d.cloudflare_zone_id = ?',
-        [req.params.zoneId]
-      );
-
-      const data = files ? { files } : { purge_everything: true };
-      
-      const result = await this.makeRequest(
-        'POST',
-        `/zones/${req.params.zoneId}/purge_cache`,
-        data,
-        zone.api_token
-      );
-
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: 'Failed to purge cache' });
-    }
-  }
-}
-
-module.exports = new CloudflareController();
-CFEOF
-
-########################################
-# === public/index.html ===
-########################################
-cat > public/index.html <<'HTMLEOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>LitePanel Pro</title>
-<link rel="stylesheet" href="/css/style.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body>
-<div id="app">
-  <div class="loading-screen">
-    <i class="fas fa-server fa-3x"></i>
-    <h1>LitePanel Pro</h1>
-    <div class="spinner"></div>
-    <p>Loading...</p>
-  </div>
-</div>
-<script src="/js/app.js"></script>
-</body>
-</html>
-HTMLEOF
-
-########################################
-# === public/css/style.css ===
-########################################
-cat > public/css/style.css <<'CSSEOF'
-:root {
-  --primary: #4f8cff;
-  --primary-dark: #3a7ae0;
-  --secondary: #6c757d;
-  --success: #28a745;
-  --danger: #dc3545;
-  --warning: #ffc107;
-  --bg-primary: #0f1117;
-  --bg-secondary: #1a1d23;
-  --bg-tertiary: #2a2d35;
-  --text-primary: #e0e0e0;
-  --text-secondary: #8a8d93;
-  --border: #3a3d45;
-}
-
-* { margin: 0; padding: 0; box-sizing: border-box; }
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  line-height: 1.6;
-}
-
-.loading-screen {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  text-align: center;
-}
-
-.loading-screen i {
-  color: var(--primary);
-  margin-bottom: 20px;
-}
-
-.spinner {
-  width: 50px;
-  height: 50px;
-  border: 3px solid var(--bg-secondary);
-  border-top-color: var(--primary);
-  border-radius: 50%;
-  margin: 20px auto;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.login-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
-}
-
-.login-box {
-  background: var(--bg-tertiary);
-  padding: 40px;
-  border-radius: 12px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-  width: 100%;
-  max-width: 400px;
-}
-
-.login-header {
-  text-align: center;
-  margin-bottom: 30px;
-}
-
-.login-header i {
-  font-size: 3rem;
-  color: var(--primary);
-  margin-bottom: 15px;
-}
-
-.login-header h1 {
-  font-size: 1.75rem;
-  margin-bottom: 5px;
-}
-
-.form-group {
-  margin-bottom: 20px;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.form-control {
-  width: 100%;
-  padding: 10px 15px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-primary);
-  font-size: 14px;
-  transition: all 0.3s;
-}
-
-.form-control:focus {
-  outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.1);
-}
-
-.btn {
-  display: inline-block;
-  padding: 10px 20px;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.3s;
-  text-decoration: none;
-}
-
-.btn-primary {
-  background: var(--primary);
-  color: white;
-}
-
-.btn-primary:hover {
-  background: var(--primary-dark);
-  transform: translateY(-1px);
-}
-
-.btn-block {
-  width: 100%;
-}
-
-.error-message {
-  background: rgba(220, 53, 69, 0.1);
-  color: var(--danger);
-  padding: 10px;
-  border-radius: 6px;
-  margin-top: 15px;
-  text-align: center;
-  font-size: 0.875rem;
-}
-
-.app-container {
-  display: flex;
-  min-height: 100vh;
-}
-
-.sidebar {
-  width: 250px;
-  background: var(--bg-secondary);
-  position: fixed;
-  height: 100vh;
-  overflow-y: auto;
-  transition: transform 0.3s;
-}
-
-.sidebar-header {
-  padding: 20px;
-  border-bottom: 1px solid var(--border);
-  text-align: center;
-}
-
-.sidebar-header h1 {
-  font-size: 1.5rem;
-  color: var(--primary);
-}
-
-.sidebar-nav {
-  padding: 20px 0;
-}
-
-.nav-item {
-  display: block;
-  padding: 12px 20px;
-  color: var(--text-secondary);
-  text-decoration: none;
-  transition: all 0.3s;
-  border-left: 3px solid transparent;
-}
-
-.nav-item:hover {
-  background: var(--bg-tertiary);
-  color: var(--primary);
-}
-
-.nav-item.active {
-  background: var(--bg-tertiary);
-  color: var(--primary);
-  border-left-color: var(--primary);
-}
-
-.nav-item i {
-  margin-right: 10px;
-  width: 20px;
-  text-align: center;
-}
-
-.main-content {
-  flex: 1;
-  margin-left: 250px;
-  background: var(--bg-primary);
-}
-
-.header {
-  background: var(--bg-secondary);
-  padding: 15px 30px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.page-content {
-  padding: 30px;
-}
-
-.card {
-  background: var(--bg-tertiary);
-  border-radius: 8px;
-  padding: 20px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 15px;
-}
-
-.card-title {
-  font-size: 1.25rem;
-  font-weight: 600;
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 20px;
-  margin-bottom: 30px;
-}
-
-.stat-card {
-  background: var(--bg-tertiary);
-  padding: 20px;
-  border-radius: 8px;
-  text-align: center;
-}
-
-.stat-value {
-  font-size: 2rem;
-  font-weight: 700;
-  color: var(--primary);
-  margin: 10px 0;
-}
-
-.stat-label {
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.table th,
-.table td {
-  padding: 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-
-.table th {
-  background: var(--bg-secondary);
-  font-weight: 600;
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.badge {
-  display: inline-block;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-
-.badge-success {
-  background: rgba(40, 167, 69, 0.2);
-  color: var(--success);
-}
-
-.badge-danger {
-  background: rgba(220, 53, 69, 0.2);
-  color: var(--danger);
-}
-
-.file-manager {
-  height: calc(100vh - 200px);
-}
-
-.file-breadcrumb {
-  padding: 15px;
-  background: var(--bg-secondary);
-  border-radius: 6px;
-  margin-bottom: 20px;
-}
-
-.file-list {
-  background: var(--bg-tertiary);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.file-item {
-  display: flex;
-  align-items: center;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.file-item:hover {
-  background: var(--bg-secondary);
-}
-
-.file-icon {
-  margin-right: 15px;
-  font-size: 1.25rem;
-}
-
-.file-name {
-  flex: 1;
-}
-
-.file-size {
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-  margin-right: 20px;
-}
-
-.file-actions {
-  display: flex;
-  gap: 10px;
-}
-
-.mobile-toggle {
-  display: none;
-  position: fixed;
-  top: 15px;
-  left: 15px;
-  z-index: 100;
-  background: var(--bg-tertiary);
-  border: none;
-  color: var(--text-primary);
-  padding: 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-@media (max-width: 768px) {
-  .sidebar {
-    transform: translateX(-100%);
-  }
-  
-  .sidebar.open {
-    transform: translateX(0);
-  }
-  
-  .main-content {
-    margin-left: 0;
-  }
-  
-  .mobile-toggle {
-    display: block;
-  }
-  
-  .stats-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0,0,0,0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.modal-content {
-  background: var(--bg-tertiary);
-  border-radius: 8px;
-  padding: 30px;
-  max-width: 500px;
-  width: 90%;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
-.modal-header {
-  margin-bottom: 20px;
-}
-
-.modal-title {
-  font-size: 1.5rem;
-  font-weight: 600;
-}
-
-.progress {
-  height: 8px;
-  background: var(--bg-secondary);
-  border-radius: 4px;
-  overflow: hidden;
-  margin-top: 5px;
-}
-
-.progress-bar {
-  height: 100%;
-  background: var(--primary);
-  transition: width 0.3s;
-}
-
-.progress-bar.danger {
-  background: var(--danger);
-}
-
-.progress-bar.warning {
-  background: var(--warning);
-}
-
-.cloudflare-section {
-  margin-top: 30px;
-}
-
-.dns-record {
-  background: var(--bg-secondary);
-  padding: 15px;
-  border-radius: 6px;
-  margin-bottom: 10px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.dns-info {
-  flex: 1;
-}
-
-.dns-type {
-  display: inline-block;
-  padding: 4px 8px;
-  background: var(--primary);
-  color: white;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  margin-right: 10px;
-}
-
-.dns-name {
-  font-weight: 600;
-  margin-right: 10px;
-}
-
-.dns-content {
-  color: var(--text-secondary);
-  font-size: 0.875rem;
-}
-
-.btn-sm {
-  padding: 6px 12px;
-  font-size: 0.875rem;
-}
-
-.btn-danger {
-  background: var(--danger);
-  color: white;
-}
-
-.btn-success {
-  background: var(--success);
-  color: white;
-}
-
-.btn-warning {
-  background: var(--warning);
-  color: #212529;
-}
-
-.toast {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  background: var(--bg-tertiary);
-  padding: 15px 20px;
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  z-index: 1000;
-  animation: slideIn 0.3s ease;
-}
-
-@keyframes slideIn {
-  from {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  to {
-    transform: translateX(0);
-    opacity: 1;
-  }
-}
-
-.toast.success {
-  border-left: 4px solid var(--success);
-}
-
-.toast.error {
-  border-left: 4px solid var(--danger);
-}
-
-.terminal {
-  background: #000;
-  color: #0f0;
-  font-family: 'Courier New', monospace;
-  padding: 20px;
-  border-radius: 6px;
-  height: 400px;
-  overflow-y: auto;
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.terminal-input {
-  display: flex;
-  margin-top: 10px;
-}
-
-.terminal-input input {
-  flex: 1;
-  background: #000;
-  border: 1px solid #333;
-  color: #0f0;
-  padding: 10px;
-  font-family: 'Courier New', monospace;
-  border-radius: 4px 0 0 4px;
-}
-
-.terminal-input button {
-  border-radius: 0 4px 4px 0;
-}
-CSSEOF
-
-########################################
-# === public/js/app.js ===
-########################################
-cat > public/js/app.js <<'JSEOF'
-class LitePanelPro {
-  constructor() {
-    this.currentPage = 'dashboard';
-    this.user = null;
-    this.init();
-  }
-
-  async init() {
-    const auth = await this.api('/api/auth/check');
-    if (auth.authenticated) {
-      this.user = auth.user;
-      this.renderApp();
-      this.navigate('dashboard');
-    } else {
-      this.renderLogin();
-    }
-  }
-
-  async api(url, options = {}) {
-    const defaults = {
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin'
-    };
-
-    if (options.body && !(options.body instanceof FormData)) {
-      options.body = JSON.stringify(options.body);
-    }
-
-    const response = await fetch(url, { ...defaults, ...options });
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Request failed');
-    }
-
-    return data;
-  }
-
-  renderLogin() {
-    document.getElementById('app').innerHTML = `
-      <div class="login-container">
-        <div class="login-box">
-          <div class="login-header">
-            <i class="fas fa-server"></i>
-            <h1>LitePanel Pro</h1>
-            <p>Enterprise Management Panel</p>
-          </div>
-          <form id="loginForm">
-            <div class="form-group">
-              <label>Username</label>
-              <input type="text" class="form-control" id="username" required>
-            </div>
-            <div class="form-group">
-              <label>Password</label>
-              <input type="password" class="form-control" id="password" required>
-            </div>
-            <button type="submit" class="btn btn-primary btn-block">
-              <i class="fas fa-sign-in-alt"></i> Login
-            </button>
-            <div id="loginError"></div>
-          </form>
-        </div>
-      </div>
-    `;
-
-    document.getElementById('loginForm').addEventListener('submit', (e) => {
-      e.preventDefault();
-      this.login();
-    });
-  }
-
-  async login() {
-    try {
-      const username = document.getElementById('username').value;
-      const password = document.getElementById('password').value;
-
-      const result = await this.api('/api/auth/login', {
-        method: 'POST',
-        body: { username, password }
-      });
-
-      if (result.success) {
-        this.user = result.user;
-        this.renderApp();
-        this.navigate('dashboard');
-      }
-    } catch (error) {
-      document.getElementById('loginError').innerHTML = 
-        `<div class="error-message">${error.message}</div>`;
-    }
-  }
-
-  renderApp() {
-    document.getElementById('app').innerHTML = `
-      <div class="app-container">
-        <aside class="sidebar" id="sidebar">
-          <div class="sidebar-header">
-            <h1><i class="fas fa-server"></i> LitePanel Pro</h1>
-          </div>
-          <nav class="sidebar-nav">
-            <a href="#" class="nav-item" data-page="dashboard">
-              <i class="fas fa-tachometer-alt"></i> Dashboard
-            </a>
-            <a href="#" class="nav-item" data-page="domains">
-              <i class="fas fa-globe"></i> Domains
-            </a>
-            <a href="#" class="nav-item" data-page="cloudflare">
-              <i class="fab fa-cloudflare"></i> Cloudflare
-            </a>
-            <a href="#" class="nav-item" data-page="files">
-              <i class="fas fa-folder"></i> File Manager
-            </a>
-            <a href="#" class="nav-item" data-page="databases">
-              <i class="fas fa-database"></i> Databases
-            </a>
-            <a href="#" class="nav-item" data-page="services">
-              <i class="fas fa-cogs"></i> Services
-            </a>
-            <a href="#" class="nav-item" data-page="terminal">
-              <i class="fas fa-terminal"></i> Terminal
-            </a>
-            <a href="#" class="nav-item" data-page="settings">
-              <i class="fas fa-cog"></i> Settings
-            </a>
-            <a href="#" class="nav-item" onclick="app.logout()">
-              <i class="fas fa-sign-out-alt"></i> Logout
-            </a>
-          </nav>
-        </aside>
-        
-        <main class="main-content">
-          <header class="header">
-            <button class="mobile-toggle" onclick="app.toggleSidebar()">
-              <i class="fas fa-bars"></i>
-            </button>
-            <h2 id="pageTitle">Dashboard</h2>
-            <div class="header-user">
-              <i class="fas fa-user-circle"></i> ${this.user.username}
-            </div>
-          </header>
-          
-          <div class="page-content" id="content">
-            <!-- Dynamic content -->
-          </div>
-        </main>
-      </div>
-    `;
-
-    // Setup navigation
-    document.querySelectorAll('.nav-item').forEach(item => {
-      item.addEventListener('click', (e) => {
-        e.preventDefault();
-        const page = item.dataset.page;
-        if (page) this.navigate(page);
-      });
-    });
-  }
-
-  navigate(page) {
-    this.currentPage = page;
-    
-    // Update active nav
-    document.querySelectorAll('.nav-item').forEach(item => {
-      item.classList.toggle('active', item.dataset.page === page);
-    });
-
-    // Update title
-    const titles = {
-      dashboard: 'Dashboard',
-      domains: 'Domain Management',
-      cloudflare: 'Cloudflare Integration',
-      files: 'File Manager',
-      databases: 'Databases',
-      services: 'Services',
-      terminal: 'Terminal',
-      settings: 'Settings'
-    };
-    
-    document.getElementById('pageTitle').textContent = titles[page] || page;
-
-    // Load page content
-    this[`render${page.charAt(0).toUpperCase() + page.slice(1)}`]();
-  }
-
-  async renderDashboard() {
-    try {
-      const stats = await this.api('/api/dashboard');
-      const services = await this.api('/api/services');
-
-      const memoryPercent = Math.round((stats.memory.used / stats.memory.total) * 100);
-      const diskPercent = Math.round((stats.disk.used / stats.disk.total) * 100);
-
-      document.getElementById('content').innerHTML = `
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-label">Hostname</div>
-            <div class="stat-value">${stats.hostname}</div>
-            <div class="stat-label">${stats.ip}</div>
-          </div>
-          
-          <div class="stat-card">
-            <div class="stat-label">CPU</div>
-            <div class="stat-value">${stats.cpu.cores} Cores</div>
-            <div class="stat-label">Load: ${stats.cpu.load.map(l => l.toFixed(2)).join(', ')}</div>
-          </div>
-          
-          <div class="stat-card">
-            <div class="stat-label">Memory</div>
-            <div class="stat-value">${memoryPercent}%</div>
-            <div class="progress">
-              <div class="progress-bar ${memoryPercent > 80 ? 'danger' : ''}" 
-                   style="width: ${memoryPercent}%"></div>
-            </div>
-            <div class="stat-label">${this.formatBytes(stats.memory.used)} / ${this.formatBytes(stats.memory.total)}</div>
-          </div>
-          
-          <div class="stat-card">
-            <div class="stat-label">Disk</div>
-            <div class="stat-value">${diskPercent}%</div>
-            <div class="progress">
-              <div class="progress-bar ${diskPercent > 80 ? 'danger' : ''}" 
-                   style="width: ${diskPercent}%"></div>
-            </div>
-            <div class="stat-label">${this.formatBytes(stats.disk.used)} / ${this.formatBytes(stats.disk.total)}</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Services Status</h3>
-          </div>
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Service</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${services.map(service => `
-                <tr>
-                  <td>${service.name}</td>
-                  <td>
-                    <span class="badge ${service.active ? 'badge-success' : 'badge-danger'}">
-                      ${service.active ? 'Running' : 'Stopped'}
-                    </span>
-                  </td>
-                  <td>
-                    <button class="btn btn-sm btn-success" 
-                            onclick="app.controlService('${service.name}', 'start')">
-                      Start
-                    </button>
-                    <button class="btn btn-sm btn-danger" 
-                            onclick="app.controlService('${service.name}', 'stop')">
-                      Stop
-                    </button>
-                    <button class="btn btn-sm btn-warning" 
-                            onclick="app.controlService('${service.name}', 'restart')">
-                      Restart
-                    </button>
-                  </td>
-                </tr>
-              `).join('')}
-            </tbody>
-          </table>
-        </div>
-      `;
-    } catch (error) {
-      this.showError(error);
-    }
-  }
-
-  async renderCloudflare() {
-    try {
-      const accounts = await this.api('/api/cloudflare/accounts');
-      
-      document.getElementById('content').innerHTML = `
-        <div class="card">
-          <div class="card-header">
-            <h3 class="card-title">Cloudflare Accounts</h3>
-            <button class="btn btn-primary" onclick="app.showAddCloudflareAccount()">
-              <i class="fas fa-plus"></i> Add Account
-            </button>
-          </div>
-          
-          ${accounts.length === 0 ? `
-            <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
-              <i class="fas fa-cloud fa-3x" style="opacity: 0.5; margin-bottom: 20px;"></i>
-              <p>No Cloudflare accounts configured yet.</p>
-              <p>Add an account to start managing your domains with Cloudflare.</p>
-            </div>
-          ` : `
-            <table class="table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Email</th>
-                  <th>Status</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${accounts.map(account => `
-                  <tr>
-                    <td>${account.name}</td>
-                    <td>${account.email}</td>
-                    <td>
-                      <span class="badge ${account.is_active ? 'badge-success' : 'badge-danger'}">
-                        ${account.is_active ? 'Active' : 'Inactive'}
-                      </span>
-                    </td>
-                    <td>
-                      <button class="btn btn-sm btn-primary" 
-                              onclick="app.viewCloudflareZones(${account.id})">
-                        View Zones
-                      </button>
-                      <button class="btn btn-sm btn-danger" 
-                              onclick="app.deleteCloudflareAccount(${account.id})">
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          `}
-        </div>
-
-        <div id="cloudflareZones"></div>
-      `;
-    } catch (error) {
-      this.showError(error);
-    }
-  }
-
-  showAddCloudflareAccount() {
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.innerHTML = `
-      <div class="modal-content">
-        <div class="modal-header">
-          <h3 class="modal-title">Add Cloudflare Account</h3>
-        </div>
-        <form id="addCloudflareForm">
-          <div class="form-group">
-            <label>Account Name</label>
-            <input type="text" class="form-control" name="name" required>
-          </div>
-          <div class="form-group">
-            <label>Email</label>
-            <input type="email" class="form-control" name="email" required>
-          </div>
-          <div class="form-group">
-            <label>API Token</label>
-            <input type="password" class="form-control" name="apiToken" required>
-            <small style="color: var(--text-secondary);">
-              Get your API token from 
-              <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank">
-                Cloudflare Dashboard
-              </a>
-            </small>
-          </div>
-          <div style="display: flex; gap: 10px;">
-            <button type="submit" class="btn btn-primary">Add Account</button>
-            <button type="button" class="btn" onclick="this.closest('.modal').remove()">
-              Cancel
-            </button>
-          </div>
-        </form>
-      </div>
-    `;
-
-    document.body.appendChild(modal);
-
-    document.getElementById('addCloudflareForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const formData = new FormData(e.target);
-      
-      try {
-        await this.api('/api/cloudflare/accounts', {
-          method: 'POST',
-          body: {
-            name: formData.get('name'),
-            email: formData.get('email'),
-            apiToken: formData.get('apiToken')
-          }
-        });
-
-        modal.remove();
-        this.showToast('Cloudflare account added successfully', 'success');
-        this.renderCloudflare();
-      } catch (error) {
-        this.showError(error);
-      }
-    });
-  }
-
-  async renderFiles() {
-    // File manager implementation
-    document.getElementById('content').innerHTML = `
-      <div class="file-manager">
-        <div class="file-breadcrumb" id="breadcrumb">
-          <i class="fas fa-home"></i> /
-        </div>
-        
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <button class="btn btn-primary btn-sm" onclick="app.uploadFile()">
-                <i class="fas fa-upload"></i> Upload
-              </button>
-              <button class="btn btn-success btn-sm" onclick="app.createFolder()">
-                <i class="fas fa-folder-plus"></i> New Folder
-              </button>
-              <button class="btn btn-warning btn-sm" onclick="app.createFile()">
-                <i class="fas fa-file-plus"></i> New File
-              </button>
-            </div>
-          </div>
-          
-          <div class="file-list" id="fileList">
-            Loading...
-          </div>
-        </div>
-      </div>
-    `;
-
-    this.loadFiles('/usr/local/lsws/vhosts');
-  }
-
-  async loadFiles(path) {
-    try {
-      const result = await this.api(`/api/files?path=${encodeURIComponent(path)}`);
-      
-      if (result.content !== undefined) {
-        // Show file editor
-        this.showFileEditor(result);
-      } else {
-        // Show directory listing
-        const fileList = document.getElementById('fileList');
-        fileList.innerHTML = result.items.map(item => `
-          <div class="file-item" onclick="app.openFile('${item.path}')">
-            <i class="file-icon fas ${item.isDirectory ? 'fa-folder' : 'fa-file'}"></i>
-            <span class="file-name">${item.name}</span>
-            <span class="file-size">${item.isDirectory ? '' : this.formatBytes(item.size)}</span>
-            <div class="file-actions">
-              ${!item.isDirectory ? `
-                <button class="btn btn-sm" onclick="event.stopPropagation(); app.downloadFile('${item.path}')">
-                  <i class="fas fa-download"></i>
-                </button>
-              ` : ''}
-              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); app.deleteFile('${item.path}')">
-                <i class="fas fa-trash"></i>
-              </button>
-            </div>
-          </div>
-        `).join('');
-
-        // Update breadcrumb
-        const parts = path.split('/').filter(Boolean);
-        document.getElementById('breadcrumb').innerHTML = 
-          '<i class="fas fa-home"></i> / ' + 
-          parts.map((part, i) => 
-            `<a href="#" onclick="app.loadFiles('/${parts.slice(0, i + 1).join('/')}')">${part}</a>`
-          ).join(' / ');
-      }
-    } catch (error) {
-      this.showError(error);
-    }
-  }
-
-  async openFile(path) {
-    this.loadFiles(path);
-  }
-
-  async controlService(name, action) {
-    try {
-      await this.api(`/api/services/${name}/${action}`, { method: 'POST' });
-      this.showToast(`Service ${name} ${action}ed successfully`, 'success');
-      this.renderDashboard();
-    } catch (error) {
-      this.showError(error);
-    }
-  }
-
-  toggleSidebar() {
-    document.getElementById('sidebar').classList.toggle('open');
-  }
-
-  async logout() {
-    await this.api('/api/auth/logout', { method: 'POST' });
-    this.user = null;
-    this.renderLogin();
-  }
-
-  formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  }
-
-  showToast(message, type = 'info') {
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `
-      <i class="fas ${type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'}"></i>
-      ${message}
-    `;
-
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 3000);
-  }
-
-  showError(error) {
-    this.showToast(error.message || 'An error occurred', 'error');
-  }
-
-  // Stub methods for other pages
-  renderDomains() {
-    document.getElementById('content').innerHTML = '<p>Domains page - Coming soon</p>';
-  }
-
-  renderDatabases() {
-    document.getElementById('content').innerHTML = '<p>Databases page - Coming soon</p>';
-  }
-
-  renderServices() {
-    document.getElementById('content').innerHTML = '<p>Services page - Coming soon</p>';
-  }
-
-  renderTerminal() {
-    document.getElementById('content').innerHTML = '<p>Terminal page - Coming soon</p>';
-  }
-
-  renderSettings() {
-    document.getElementById('content').innerHTML = '<p>Settings page - Coming soon</p>';
-  }
-}
-
-// Initialize app
-const app = new LitePanelPro();
-JSEOF
-
-########################################
-step "Step 8/12: Configure OpenLiteSpeed"
-########################################
-# Configure PHP handler for OpenLiteSpeed
-cat > /usr/local/lsws/conf/vhosts/Example/vhconf.conf <<'VHEOF'
-docRoot                   $VH_ROOT/html
-vhDomain                  *
-enableGzip                1
-
-index {
+errorlog $VH_ROOT/logs/error.log {
   useServer               0
-  indexFiles              index.php, index.html
+  logLevel                INFO
+  rollingSize             10M
 }
 
 scripthandler {
   add                     lsapi:lsphp81 php
 }
 
+accessControl {
+  allow                   *
+}
+
 rewrite {
   enable                  1
   autoLoadHtaccess        1
 }
-VHEOF
-
-# Set admin password for OpenLiteSpeed
-/usr/local/lsws/admin/misc/admpass.sh <<EOF
-admin
-${ADMIN_PASS}
-${ADMIN_PASS}
 EOF
 
+# Fix ownership for OpenLiteSpeed user
+chown -R nobody:nogroup "${PMA_DIR}"
+chmod -R 755 "${PMA_DIR}"
+find "${PMA_DIR}" -type f -name "*.php" -exec chmod 644 {} \;
+
+# Create .htaccess for security
+cat > "${PMA_DIR}/.htaccess" << 'EOF'
+DirectoryIndex index.php
+Options -Indexes
+<FilesMatch "\.php$">
+    SetHandler lsapi:lsphp81
+</FilesMatch>
+EOF
+
+chown nobody:nogroup "${PMA_DIR}/.htaccess"
+
+# Restart OpenLiteSpeed to apply changes
 systemctl restart lsws
-log "OpenLiteSpeed configured"
+sleep 3
+
+# Verify configuration
+if curl -s -o /dev/null -w "%{http_code}" http://localhost/phpmyadmin/ | grep -q "200\|302"; then
+    log "phpMyAdmin configuration completed successfully"
+else
+    log "WARNING: phpMyAdmin may not be accessible. Please check manually."
+fi
 
 ########################################
-step "Step 9/12: Install phpMyAdmin"
+step "Step 8/10: Install Cloudflared + Fail2Ban"
 ########################################
+ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 cd /tmp
-wget https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz -O pma.tar.gz 2>/dev/null
-tar xzf pma.tar.gz
-mkdir -p /usr/local/lsws/Example/html/phpmyadmin
-cp -rf phpMyAdmin-*/* /usr/local/lsws/Example/html/phpmyadmin/
-rm -rf phpMyAdmin-* pma.tar.gz
+if [ "$ARCH" = "arm64" ]; then
+  CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb"
+else
+  CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+fi
+wget -q "$CF_URL" -O cloudflared.deb 2>/dev/null
+if [ -f cloudflared.deb ] && [ -s cloudflared.deb ]; then
+  dpkg -i cloudflared.deb > /dev/null 2>&1
+  rm -f cloudflared.deb
+  log "Cloudflared installed"
+else
+  err "Cloudflared download failed"
+fi
 
-cat > /usr/local/lsws/Example/html/phpmyadmin/config.inc.php <<PMAEOF
-<?php
-\$cfg['blowfish_secret'] = '$(openssl rand -hex 32)';
-\$i = 0;
-\$i++;
-\$cfg['Servers'][\$i]['host'] = 'localhost';
-\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
-\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
-PMAEOF
-
-chown -R nobody:nogroup /usr/local/lsws/Example/html/phpmyadmin
-log "phpMyAdmin installed"
+apt-get install -y -qq fail2ban > /dev/null 2>&1
+systemctl enable fail2ban > /dev/null 2>&1
+systemctl start fail2ban 2>/dev/null
+log "Fail2Ban installed"
 
 ########################################
-step "Step 10/12: Setup Services & Firewall"
+step "Step 9/10: Configure Firewall + Start Services"
 ########################################
-# Create systemd service
 cat > /etc/systemd/system/litepanel.service <<SVCEOF
 [Unit]
-Description=LitePanel Pro - Enterprise Management Panel
-After=network.target mariadb.service redis-server.service
+Description=LitePanel Control Panel
+After=network.target mariadb.service
 
 [Service]
 Type=simple
@@ -2539,122 +2291,150 @@ ExecStart=/usr/bin/node app.js
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
-User=root
 
 [Install]
 WantedBy=multi-user.target
 SVCEOF
 
 systemctl daemon-reload
-systemctl enable litepanel
+systemctl enable litepanel > /dev/null 2>&1
 systemctl start litepanel
 
-# Configure firewall
 ufw --force reset > /dev/null 2>&1
 ufw default deny incoming > /dev/null 2>&1
 ufw default allow outgoing > /dev/null 2>&1
-ufw allow 22/tcp > /dev/null 2>&1
-ufw allow 80/tcp > /dev/null 2>&1
-ufw allow 443/tcp > /dev/null 2>&1
-ufw allow ${PANEL_PORT}/tcp > /dev/null 2>&1
-ufw allow 7080/tcp > /dev/null 2>&1
+for port in 22 80 443 ${PANEL_PORT} 7080 8088; do
+  ufw allow ${port}/tcp > /dev/null 2>&1
+done
 ufw --force enable > /dev/null 2>&1
-
-log "Services configured and started"
-
-########################################
-step "Step 11/12: Install Fail2ban"
-########################################
-apt-get install -y -qq fail2ban > /dev/null 2>&1
-systemctl enable fail2ban > /dev/null 2>&1
-systemctl start fail2ban
-log "Fail2ban installed"
+log "Firewall configured"
 
 ########################################
-step "Step 12/12: Save Credentials"
+step "Step 10/10: Verify & Fix Services"
 ########################################
+log "Verifying all services..."
+
+# Restart services in correct order
+systemctl restart mariadb 2>/dev/null
+sleep 2
+systemctl restart lsws 2>/dev/null
+sleep 3
+
+# Verify MySQL socket link
+if [ -S "/var/run/mysqld/mysqld.sock" ] && [ ! -S "/tmp/mysql.sock" ]; then
+  ln -sf /var/run/mysqld/mysqld.sock /tmp/mysql.sock
+  log "MySQL socket symlink verified"
+fi
+
+# Test PHP MySQL connection
+PHP_TEST=$(php -r "
+try {
+  \$mysqli = new mysqli('localhost', 'root', '${DB_ROOT_PASS}');
+  if (\$mysqli->connect_error) {
+    echo 'FAIL: ' . \$mysqli->connect_error;
+  } else {
+    echo 'OK';
+    \$mysqli->close();
+  }
+} catch (Exception \$e) {
+  echo 'FAIL: ' . \$e->getMessage();
+}
+" 2>&1)
+
+if [[ "$PHP_TEST" == "OK" ]]; then
+  log "PHP MySQL connection verified"
+else
+  warn "PHP MySQL connection test: $PHP_TEST"
+  # Try alternative socket configuration
+  mkdir -p /var/lib/mysql
+  ln -sf /var/run/mysqld/mysqld.sock /var/lib/mysql/mysql.sock 2>/dev/null
+fi
+
+# Test phpMyAdmin accessibility
+PHPMYADMIN_TEST=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8088/phpmyadmin/ 2>/dev/null)
+if [ "$PHPMYADMIN_TEST" = "200" ] || [ "$PHPMYADMIN_TEST" = "302" ]; then
+  log "phpMyAdmin is accessible (HTTP $PHPMYADMIN_TEST)"
+else
+  warn "phpMyAdmin returned HTTP $PHPMYADMIN_TEST - checking configuration..."
+  # Force restart LSWS to reload PHP configuration
+  systemctl restart lsws
+  sleep 3
+fi
+
+# Create cloudflare.json file with empty config
+cat > ${PANEL_DIR}/cloudflare.json << 'CFGEOF'
+{
+  "apiToken": "",
+  "accountId": "",
+  "accountName": "",
+  "email": "",
+  "zones": {}
+}
+CFGEOF
+chmod 600 ${PANEL_DIR}/cloudflare.json
+
+# Save credentials to secure location
 mkdir -p /etc/litepanel
-cat > /etc/litepanel/credentials.txt <<CREDEOF
-==============================================
-       LITEPANEL PRO INSTALLATION INFO
-==============================================
-Installation Date: $(date)
-Server IP: ${SERVER_IP}
+cat > /etc/litepanel/credentials <<CREDEOF
+==========================================
+  LitePanel Credentials (v2.1)
+==========================================
+Panel URL:     http://${SERVER_IP}:${PANEL_PORT}
+Panel Login:   ${ADMIN_USER} / ${ADMIN_PASS}
 
-==============================================
-              ACCESS URLS
-==============================================
-LitePanel Pro:    http://${SERVER_IP}:${PANEL_PORT}
-OpenLiteSpeed:    http://${SERVER_IP}:7080
-phpMyAdmin:       http://${SERVER_IP}:8088/phpmyadmin/
+OLS Admin:     http://${SERVER_IP}:7080
+OLS Login:     admin / ${ADMIN_PASS}
 
-==============================================
-              CREDENTIALS
-==============================================
-LitePanel Login:  ${ADMIN_USER} / ${ADMIN_PASS}
-OLS Admin Login:  admin / ${ADMIN_PASS}
-MariaDB Root:     ${DB_ROOT_PASS}
+phpMyAdmin:    http://${SERVER_IP}:8088/phpmyadmin/
 
-==============================================
-              IMPORTANT NOTES
-==============================================
-1. Change all default passwords after login
-2. Configure SSL certificates for production
-3. Setup Cloudflare integration in panel
-4. Regular backups recommended
-
-==============================================
-              USEFUL COMMANDS
-==============================================
-Restart Panel:    systemctl restart litepanel
-View Logs:        journalctl -u litepanel -f
-Panel Status:     systemctl status litepanel
-
-==============================================
+MariaDB Root:  ${DB_ROOT_PASS}
+==========================================
+Generated: $(date)
+==========================================
 CREDEOF
+chmod 600 /etc/litepanel/credentials
 
-chmod 600 /etc/litepanel/credentials.txt
-cp /etc/litepanel/credentials.txt /root/litepanel_credentials.txt
+# Also save to user home for convenience
+cp /etc/litepanel/credentials /root/.litepanel_credentials
+
+log "All services verified and running"
 
 ########################################
 # FINAL SUMMARY
 ########################################
-clear
-echo -e "${M}"
-cat << "EOF"
-   __    _ __       ____                  __   ____           
-  / /   (_) /____  / __ \____ _____  ___  / /  / __ \_________ 
- / /   / / __/ _ \/ /_/ / __ `/ __ \/ _ \/ /  / /_/ / ___/ __ \
-/ /___/ / /_/  __/ ____/ /_/ / / / /  __/ /  / ____/ /  / /_/ /
-/_____/_/\__/\___/_/    \__,_/_/ /_/\___/_/  /_/   /_/   \____/ 
-                                                                 
-EOF
-echo -e "${N}"
-echo -e "${G}╔═══════════════════════════════════════════════════════╗${N}"
-echo -e "${G}║          INSTALLATION COMPLETED SUCCESSFULLY!          ║${N}"
-echo -e "${G}╚═══════════════════════════════════════════════════════╝${N}"
-echo
-echo -e "${C}Access Information:${N}"
-echo -e "LitePanel Pro:  ${Y}http://${SERVER_IP}:${PANEL_PORT}${N}"
-echo -e "Username:       ${Y}${ADMIN_USER}${N}"
-echo -e "Password:       ${Y}${ADMIN_PASS}${N}"
-echo
-echo -e "${C}Additional Services:${N}"
-echo -e "OpenLiteSpeed:  ${Y}http://${SERVER_IP}:7080${N} (admin / ${ADMIN_PASS})"
-echo -e "phpMyAdmin:     ${Y}http://${SERVER_IP}:8088/phpmyadmin/${N}"
-echo
-echo -e "${C}Credentials saved to:${N}"
-echo -e "  ${B}/etc/litepanel/credentials.txt${N}"
-echo -e "  ${B}/root/litepanel_credentials.txt${N}"
-echo
-echo -e "${G}Service Status:${N}"
-for svc in lsws mariadb redis-server litepanel; do
-  if systemctl is-active --quiet $svc; then
-    echo -e "  ${G}[✓]${N} $svc"
+echo ""
+echo -e "${C}╔══════════════════════════════════════════════╗${N}"
+echo -e "${C}║         ✅ Installation Complete!             ║${N}"
+echo -e "${C}╠══════════════════════════════════════════════╣${N}"
+echo -e "${C}║${N}                                              ${C}║${N}"
+echo -e "${C}║${N}  LitePanel:   ${G}http://${SERVER_IP}:${PANEL_PORT}${N}"
+echo -e "${C}║${N}  OLS Admin:   ${G}http://${SERVER_IP}:7080${N}"
+echo -e "${C}║${N}  phpMyAdmin:  ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
+echo -e "${C}║${N}                                              ${C}║${N}"
+echo -e "${C}║${N}  Panel Login:  ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
+echo -e "${C}║${N}  OLS Admin:    ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
+echo -e "${C}║${N}  DB root Pass: ${Y}${DB_ROOT_PASS}${N}"
+echo -e "${C}║${N}                                              ${C}║${N}"
+echo -e "${C}║${N}  Saved: ${B}/etc/litepanel/credentials${N}"
+echo -e "${C}║${N}                                              ${C}║${N}"
+echo -e "${C}╚══════════════════════════════════════════════╝${N}"
+echo ""
+
+echo -e "${B}NEW FEATURE: Cloudflare Multi-Domain Management${N}"
+echo -e "${G}✓${N} Configure Cloudflare API in the new Cloudflare section"
+echo -e "${G}✓${N} Manage unlimited domains through Cloudflare dashboard"
+echo -e "${G}✓${N} DNS management directly from the panel"
+echo ""
+
+echo -e "${B}Service Status:${N}"
+for svc in lsws mariadb litepanel fail2ban; do
+  if systemctl is-active --quiet $svc 2>/dev/null; then
+    echo -e "  ${G}[✓]${N} $svc running"
   else
-    echo -e "  ${R}[✗]${N} $svc"
+    echo -e "  ${R}[✗]${N} $svc not running"
   fi
 done
-echo
-echo -e "${Y}⚠️  IMPORTANT: Change all default passwords after first login!${N}"
-echo -e "${G}═══════════════════════════════════════════════════════${N}"
+echo ""
+echo -e "${G}DONE! Open http://${SERVER_IP}:${PANEL_PORT} in your browser${N}"
+echo ""
+echo -e "${Y}TIP: To check phpMyAdmin, visit http://${SERVER_IP}:8088/phpmyadmin/${N}"

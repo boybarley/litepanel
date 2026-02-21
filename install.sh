@@ -1384,6 +1384,85 @@ else
   log "phpMyAdmin listener configured successfully"
 fi
 
+########################################
+# FIX: Configure OpenLiteSpeed for phpMyAdmin
+########################################
+log "Configuring OpenLiteSpeed for phpMyAdmin access..."
+
+# Ensure Example virtualhost exists and configured properly
+if ! grep -q "virtualhost Example" "$OLS_CONF"; then
+    cat >> "$OLS_CONF" << 'EOF'
+
+virtualhost Example {
+  vhRoot                  /usr/local/lsws/Example/
+  configFile              $SERVER_ROOT/conf/vhosts/$VH_NAME/vhconf.conf
+  allowSymbolLink         1
+  enableScript            1
+  restrained              0
+  setUIDMode              0
+}
+EOF
+fi
+
+# Ensure PHP extprocessor exists
+if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
+    # Find insertion point
+    LINE=$(grep -n "virtualhost" "$OLS_CONF" | head -1 | cut -d: -f1)
+    if [ -n "$LINE" ]; then
+        sed -i "${LINE}i\\
+extprocessor lsphp81 {\\
+  type                    lsapi\\
+  address                 uds://tmp/lshttpd/lsphp.sock\\
+  maxConns                10\\
+  env                     PHP_LSAPI_CHILDREN=10\\
+  initTimeout             60\\
+  retryTimeout            0\\
+  respBuffer              0\\
+  autoStart               2\\
+  path                    /usr/local/lsws/lsphp81/bin/lsphp\\
+  backlog                 100\\
+  instances               1\\
+  memSoftLimit            2047M\\
+  memHardLimit            2047M\\
+}\\
+" "$OLS_CONF"
+    fi
+fi
+
+# Update Example vhost config
+cat > /usr/local/lsws/conf/vhosts/Example/vhconf.conf << 'EOF'
+docRoot                   $VH_ROOT/html
+vhDomain                  *
+enableGzip                1
+
+index {
+  useServer               0
+  indexFiles              index.php, index.html
+}
+
+scripthandler {
+  add                     lsapi:lsphp81 php
+}
+
+accessControl {
+  allow                   *
+}
+
+rewrite {
+  enable                  1
+  autoLoadHtaccess        1
+}
+EOF
+
+# Fix ownership
+chown -R nobody:nogroup "${PMA_DIR}"
+chmod -R 755 "${PMA_DIR}"
+
+# Restart OpenLiteSpeed
+systemctl restart lsws
+sleep 3
+
+log "phpMyAdmin configuration completed"
 
 ########################################
 step "Step 8/10: Install Cloudflared + Fail2Ban"

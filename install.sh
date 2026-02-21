@@ -1272,125 +1272,16 @@ else
 fi
 
 ########################################
-# FIX: Configure OpenLiteSpeed for phpMyAdmin
+# Step 7.5: Configure OpenLiteSpeed for phpMyAdmin
 ########################################
 log "Configuring OpenLiteSpeed for phpMyAdmin access..."
 
-# Backup current config
-cp "$OLS_CONF" "$OLS_CONF.bak.phpmyadmin"
-
-# Add listener for port 8088 if not exists
-if ! grep -q "listener phpMyAdmin" "$OLS_CONF"; then
-  log "Adding phpMyAdmin listener on port 8088..."
-  cat >> "$OLS_CONF" <<'PMALISTENER'
-
-listener phpMyAdmin {
-  address                 *:8088
-  secure                  0
-  map                     Example *
-}
-PMALISTENER
-fi
-
-# Ensure Example vhost is properly configured
-EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
-if [ -f "$EXAMPLE_VHCONF" ]; then
-  # Backup
-  cp "$EXAMPLE_VHCONF" "$EXAMPLE_VHCONF.bak.phpmyadmin"
-  
-  # Ensure docRoot is set correctly
-  if ! grep -q "docRoot.*Example/html" "$EXAMPLE_VHCONF"; then
-    sed -i '/docRoot/c\docRoot                   $VH_ROOT/html' "$EXAMPLE_VHCONF"
-  fi
-  
-  # Ensure index files include index.php
-  if ! grep -q "index.php" "$EXAMPLE_VHCONF"; then
-    # Check if index section exists
-    if grep -q "^index" "$EXAMPLE_VHCONF"; then
-      # Update existing index section
-      sed -i '/indexFiles/c\  indexFiles              index.php, index.html' "$EXAMPLE_VHCONF"
-    else
-      # Add index section
-      cat >> "$EXAMPLE_VHCONF" <<'INDEXEOF'
-
-index {
-  useServer               0
-  indexFiles              index.php, index.html
-  autoIndex               0
-}
-INDEXEOF
-    fi
-  fi
-  
-  # Ensure PHP handler is configured
-  if ! grep -q "scripthandler" "$EXAMPLE_VHCONF"; then
-    cat >> "$EXAMPLE_VHCONF" <<'HANDLEREOF'
-
-scripthandler {
-  add                     lsapi:lsphp81 php
-}
-HANDLEREOF
-  else
-    # Update existing handler to use lsphp81
-    sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
-  fi
-  
-  # Add rewrite rules for phpMyAdmin
-  if ! grep -q "rewrite" "$EXAMPLE_VHCONF"; then
-    cat >> "$EXAMPLE_VHCONF" <<'REWRITEEOF'
-
-rewrite {
-  enable                  1
-  autoLoadHtaccess        1
-}
-REWRITEEOF
-  fi
-  
-  log "Example vhost configured for phpMyAdmin"
-fi
-
-# Create .htaccess for phpMyAdmin if needed
-if [ -d "${PMA_DIR}" ]; then
-  cat > "${PMA_DIR}/.htaccess" <<'HTACCESSEOF'
-# phpMyAdmin .htaccess
-DirectoryIndex index.php
-Options -Indexes +FollowSymLinks
-
-<FilesMatch "\.php$">
-  SetHandler lsapi:lsphp81
-</FilesMatch>
-
-# Security headers
-Header set X-Content-Type-Options "nosniff"
-Header set X-Frame-Options "DENY"
-Header set X-XSS-Protection "1; mode=block"
-HTACCESSEOF
-  chown nobody:nogroup "${PMA_DIR}/.htaccess"
-fi
-
-# Restart OpenLiteSpeed to apply changes
-log "Restarting OpenLiteSpeed to apply phpMyAdmin configuration..."
-systemctl restart lsws
-sleep 3
-
-# Verify OLS is running
-if ! systemctl is-active --quiet lsws; then
-  warn "OpenLiteSpeed failed to restart, reverting configuration..."
-  cp "$OLS_CONF.bak.phpmyadmin" "$OLS_CONF"
-  cp "$EXAMPLE_VHCONF.bak.phpmyadmin" "$EXAMPLE_VHCONF"
-  systemctl restart lsws
-  err "Failed to configure phpMyAdmin listener"
-else
-  log "phpMyAdmin listener configured successfully"
-fi
-
-########################################
-# FIX: Configure OpenLiteSpeed for phpMyAdmin
-########################################
-log "Configuring OpenLiteSpeed for phpMyAdmin access..."
+# Backup original config
+cp "$OLS_CONF" "$OLS_CONF.backup.$(date +%Y%m%d_%H%M%S)"
 
 # Ensure Example virtualhost exists and configured properly
 if ! grep -q "virtualhost Example" "$OLS_CONF"; then
+    log "Adding Example virtualhost configuration..."
     cat >> "$OLS_CONF" << 'EOF'
 
 virtualhost Example {
@@ -1402,11 +1293,16 @@ virtualhost Example {
   setUIDMode              0
 }
 EOF
+else
+    # Update existing config to enable script
+    sed -i '/virtualhost Example {/,/^}/ s/enableScript.*/enableScript            1/' "$OLS_CONF"
+    sed -i '/virtualhost Example {/,/^}/ s/restrained.*/restrained              0/' "$OLS_CONF"
 fi
 
 # Ensure PHP extprocessor exists
 if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
-    # Find insertion point
+    log "Adding PHP processor configuration..."
+    # Find insertion point before first virtualhost
     LINE=$(grep -n "virtualhost" "$OLS_CONF" | head -1 | cut -d: -f1)
     if [ -n "$LINE" ]; then
         sed -i "${LINE}i\\
@@ -1429,7 +1325,10 @@ extprocessor lsphp81 {\\
     fi
 fi
 
-# Update Example vhost config
+# Create/Update Example vhost config directory
+mkdir -p /usr/local/lsws/conf/vhosts/Example
+
+# Update Example vhost config with proper PHP handler
 cat > /usr/local/lsws/conf/vhosts/Example/vhconf.conf << 'EOF'
 docRoot                   $VH_ROOT/html
 vhDomain                  *
@@ -1438,6 +1337,13 @@ enableGzip                1
 index {
   useServer               0
   indexFiles              index.php, index.html
+  autoIndex               0
+}
+
+errorlog $VH_ROOT/logs/error.log {
+  useServer               0
+  logLevel                INFO
+  rollingSize             10M
 }
 
 scripthandler {
@@ -1454,15 +1360,32 @@ rewrite {
 }
 EOF
 
-# Fix ownership
+# Fix ownership for OpenLiteSpeed user
 chown -R nobody:nogroup "${PMA_DIR}"
 chmod -R 755 "${PMA_DIR}"
+find "${PMA_DIR}" -type f -name "*.php" -exec chmod 644 {} \;
 
-# Restart OpenLiteSpeed
+# Create .htaccess for security
+cat > "${PMA_DIR}/.htaccess" << 'EOF'
+DirectoryIndex index.php
+Options -Indexes
+<FilesMatch "\.php$">
+    SetHandler lsapi:lsphp81
+</FilesMatch>
+EOF
+
+chown nobody:nogroup "${PMA_DIR}/.htaccess"
+
+# Restart OpenLiteSpeed to apply changes
 systemctl restart lsws
 sleep 3
 
-log "phpMyAdmin configuration completed"
+# Verify configuration
+if curl -s -o /dev/null -w "%{http_code}" http://localhost/phpmyadmin/ | grep -q "200\|302"; then
+    log "phpMyAdmin configuration completed successfully"
+else
+    log "WARNING: phpMyAdmin may not be accessible. Please check manually."
+fi
 
 ########################################
 step "Step 8/10: Install Cloudflared + Fail2Ban"

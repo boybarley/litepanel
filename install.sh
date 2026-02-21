@@ -1276,6 +1276,15 @@ fi
 ########################################
 log "Configuring OpenLiteSpeed for phpMyAdmin access..."
 
+# Define OpenLiteSpeed config path
+OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
+
+# Check if config exists
+if [ ! -f "$OLS_CONF" ]; then
+    log "ERROR: OpenLiteSpeed config not found at $OLS_CONF"
+    exit 1
+fi
+
 # Backup original config
 cp "$OLS_CONF" "$OLS_CONF.backup.$(date +%Y%m%d_%H%M%S)"
 
@@ -1327,6 +1336,7 @@ fi
 
 # Create/Update Example vhost config directory
 mkdir -p /usr/local/lsws/conf/vhosts/Example
+mkdir -p /usr/local/lsws/Example/logs
 
 # Update Example vhost config with proper PHP handler
 cat > /usr/local/lsws/conf/vhosts/Example/vhconf.conf << 'EOF'
@@ -1536,7 +1546,7 @@ echo -e "${C}║${N}  phpMyAdmin:  ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}║${N}  Panel Login:  ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
 echo -e "${C}║${N}  OLS Admin:    ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
-echo -e "${C}║${N}  DB Root Pass: ${Y}${DB_ROOT_PASS}${N}"
+echo -e "${C}║${N}  DB root Pass: ${Y}${DB_ROOT_PASS}${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}║${N}  Saved: ${B}/etc/litepanel/credentials${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"

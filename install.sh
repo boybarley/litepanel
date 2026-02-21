@@ -77,7 +77,6 @@ REPO_ADDED=0
 
 # ============================================
 # METHOD 1: Official LiteSpeed repo script
-# (This is what LiteSpeed recommends)
 # ============================================
 log "Adding LiteSpeed repository (Method 1: official script)..."
 wget -qO /tmp/ls_repo.sh https://repo.litespeed.sh 2>/dev/null
@@ -175,31 +174,109 @@ fi
 log "OpenLiteSpeed installed"
 
 # ============================================
-# INSTALL PHP 8.1 WITH ALL REQUIRED EXTENSIONS
+# FIX: INSTALL PHP 8.1 WITH BETTER ERROR HANDLING
 # ============================================
 log "Installing PHP 8.1 with all required extensions..."
 
-# Core PHP packages
-CORE_PKGS="lsphp81 lsphp81-common lsphp81-mysql lsphp81-mysqli lsphp81-curl lsphp81-json"
-apt-get install -y $CORE_PKGS > /tmp/php_install.log 2>&1
-PHP_RC=$?
+# First, check what PHP packages are available
+log "Checking available PHP packages..."
+apt-cache search lsphp81 | grep -E "^lsphp81" > /tmp/available_php_packages.txt
 
-if [ $PHP_RC -ne 0 ]; then
-  err "Failed to install core PHP packages. Check /tmp/php_install.log"
+# Method 1: Try to install packages one by one
+PHP_INSTALLED=0
+
+# Essential package first
+log "Installing lsphp81 base package..."
+apt-get install -y lsphp81 > /tmp/php_base_install.log 2>&1
+if [ $? -eq 0 ] && [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
+  PHP_INSTALLED=1
+  log "Base PHP 8.1 installed successfully"
+else
+  warn "Failed to install lsphp81, checking alternatives..."
+  
+  # Try alternative package names
+  for pkg in "lsphp81" "lsphp8.1" "litespeed-php81"; do
+    if apt-cache show $pkg > /dev/null 2>&1; then
+      log "Trying to install $pkg..."
+      apt-get install -y $pkg > /tmp/php_alt_install.log 2>&1
+      if [ $? -eq 0 ]; then
+        PHP_INSTALLED=1
+        log "PHP installed via $pkg"
+        break
+      fi
+    fi
+  done
+fi
+
+if [ $PHP_INSTALLED -eq 0 ]; then
+  err "═══════════════════════════════════════════════"
+  err "FATAL: Could not install PHP 8.1!"
+  err "Available packages:"
+  cat /tmp/available_php_packages.txt
+  err ""
+  err "Last install attempt log:"
+  tail -20 /tmp/php_base_install.log
+  err "═══════════════════════════════════════════════"
+  err "Please install manually:"
+  err "  apt-get update"
+  err "  apt-get install lsphp81 lsphp81-mysql lsphp81-common"
+  err "═══════════════════════════════════════════════"
   exit 1
 fi
 
-# Additional required extensions for phpMyAdmin
-ADDITIONAL_PKGS="lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd lsphp81-intl lsphp81-iconv lsphp81-opcache lsphp81-bz2"
-apt-get install -y $ADDITIONAL_PKGS >> /tmp/php_install.log 2>&1
+# Install PHP extensions with individual error handling
+log "Installing PHP extensions..."
+FAILED_EXTS=""
+
+# Core extensions for phpMyAdmin
+for ext in "common" "mysql" "mysqli" "curl" "json" "mbstring" "xml" "gd" "zip" "intl" "opcache"; do
+  PKG="lsphp81-$ext"
+  
+  # Skip if package doesn't exist
+  if ! apt-cache show $PKG > /dev/null 2>&1; then
+    # Try without hyphen
+    PKG="lsphp81$ext"
+    if ! apt-cache show $PKG > /dev/null 2>&1; then
+      warn "Package $ext not found, skipping..."
+      continue
+    fi
+  fi
+  
+  apt-get install -y $PKG > /tmp/php_ext_${ext}.log 2>&1
+  if [ $? -eq 0 ]; then
+    log "Installed $PKG"
+  else
+    warn "Failed to install $PKG"
+    FAILED_EXTS="$FAILED_EXTS $ext"
+  fi
+done
+
+# Check if critical extensions are missing
+CRITICAL_MISSING=""
+for ext in "mysql" "mysqli" "json"; do
+  if [[ "$FAILED_EXTS" == *"$ext"* ]]; then
+    CRITICAL_MISSING="$CRITICAL_MISSING $ext"
+  fi
+done
+
+if [ -n "$CRITICAL_MISSING" ]; then
+  warn "Critical PHP extensions missing:$CRITICAL_MISSING"
+  warn "phpMyAdmin may not work properly!"
+fi
 
 # Create symlink and verify
 if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
   ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
   PHP_VERSION=$(php -v 2>/dev/null | head -1 | awk '{print $2}')
   log "PHP 8.1 installed ($PHP_VERSION)"
+  
+  # Show installed extensions
+  log "Installed PHP extensions:"
+  php -m 2>/dev/null | grep -E "(mysql|json|mbstring|gd|xml|curl)" | while read ext; do
+    echo "  - $ext"
+  done
 else
-  err "lsphp81 binary not found - PHP installation failed"
+  err "PHP binary not found at expected location"
   exit 1
 fi
 
@@ -207,7 +284,88 @@ fi
 # CONFIGURE PHP FOR MYSQL SOCKET
 # ============================================
 log "Configuring PHP MySQL socket path..."
-PHP_INI="/usr/local/lsws/lsphp81/etc/php/8.1/litespeed/php.ini"
+
+# Find php.ini location
+PHP_INI_DIR="/usr/local/lsws/lsphp81/etc/php/8.1/litespeed"
+if [ ! -d "$PHP_INI_DIR" ]; then
+  # Try alternative paths
+  for dir in "/usr/local/lsws/lsphp81/etc/php/8.1/mods-available" \
+             "/usr/local/lsws/lsphp81/etc" \
+             "/usr/local/lsws/lsphp81/lib"; do
+    if [ -d "$dir" ]; then
+      PHP_INI_DIR="$dir"
+      break
+    fi
+  done
+fi
+
+# Create php.ini if it doesn't exist
+PHP_INI="$PHP_INI_DIR/php.ini"
+if [ ! -f "$PHP_INI" ]; then
+  log "Creating php.ini at $PHP_INI"
+  mkdir -p "$PHP_INI_DIR"
+  
+  # Copy from template if exists
+  if [ -f "/usr/local/lsws/lsphp81/etc/php.ini-production" ]; then
+    cp "/usr/local/lsws/lsphp81/etc/php.ini-production" "$PHP_INI"
+  else
+    # Create minimal php.ini
+    cat > "$PHP_INI" <<'PHPINI'
+[PHP]
+engine = On
+short_open_tag = Off
+precision = 14
+output_buffering = 4096
+implicit_flush = Off
+disable_functions =
+disable_classes =
+expose_php = Off
+max_execution_time = 30
+max_input_time = 60
+memory_limit = 256M
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+display_errors = Off
+log_errors = On
+post_max_size = 50M
+upload_max_filesize = 50M
+max_file_uploads = 20
+default_socket_timeout = 60
+
+[MySQLi]
+mysqli.default_socket = /var/run/mysqld/mysqld.sock
+mysqli.default_host = localhost
+mysqli.default_user =
+mysqli.default_pw =
+mysqli.reconnect = Off
+
+[MySQL]  
+mysql.default_socket = /var/run/mysqld/mysqld.sock
+
+[PDO_MYSQL]
+pdo_mysql.default_socket = /var/run/mysqld/mysqld.sock
+
+[Session]
+session.save_handler = files
+session.save_path = "/tmp"
+session.use_strict_mode = 0
+session.use_cookies = 1
+session.cookie_httponly = 1
+session.use_only_cookies = 1
+session.name = PHPSESSID
+session.cookie_lifetime = 0
+session.cookie_path = /
+session.serialize_handler = php
+session.gc_probability = 1
+session.gc_divisor = 1000
+session.gc_maxlifetime = 1440
+
+[Date]
+date.timezone = UTC
+PHPINI
+  fi
+fi
+
+# Update MySQL socket configuration
 if [ -f "$PHP_INI" ]; then
   # Backup original
   cp "$PHP_INI" "$PHP_INI.bak"
@@ -227,118 +385,19 @@ else
   warn "PHP ini file not found at expected location"
 fi
 
-# ============================================
-# CONFIGURE OLS (only if config exists!)
-# ============================================
-OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
-
-if [ ! -f "$OLS_CONF" ]; then
-  err "OLS config file not found: $OLS_CONF"
-  err "OpenLiteSpeed may have installed incorrectly."
-  exit 1
+# Create additional ini file for LiteSpeed
+LSPHP_CONF="/usr/local/lsws/lsphp81/etc/php/8.1/mods-available/99-mysql-socket.ini"
+if [ ! -f "$LSPHP_CONF" ]; then
+  mkdir -p "$(dirname "$LSPHP_CONF")"
+  cat > "$LSPHP_CONF" <<'SOCKINI'
+; MySQL socket configuration for phpMyAdmin
+mysqli.default_socket = /var/run/mysqld/mysqld.sock
+mysql.default_socket = /var/run/mysqld/mysqld.sock  
+pdo_mysql.default_socket = /var/run/mysqld/mysqld.sock
+SOCKINI
+  log "Created additional MySQL socket configuration"
 fi
 
-log "Configuring OpenLiteSpeed..."
-
-# Backup original config
-cp "$OLS_CONF" "$OLS_CONF.bak"
-
-# Set admin password (MD5 format, same method as CyberPanel)
-if [ -d "/usr/local/lsws/admin/conf" ]; then
-  OLS_HASH=$(printf '%s' "${ADMIN_PASS}" | md5sum | awk '{print $1}')
-  echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
-  log "OLS admin password set"
-else
-  warn "OLS admin conf directory not found"
-fi
-
-# Add lsphp81 extprocessor
-if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
-  cat >> "$OLS_CONF" <<'EXTEOF'
-
-extprocessor lsphp81 {
-  type                    lsapi
-  address                 uds://tmp/lshttpd/lsphp81.sock
-  maxConns                10
-  env                     PHP_LSAPI_CHILDREN=10
-  env                     LSAPI_AVOID_FORK=200M
-  initTimeout             60
-  retryTimeout            0
-  pcKeepAliveTimeout      0
-  respBuffer              0
-  autoStart               2
-  path                    /usr/local/lsws/lsphp81/bin/lsphp
-  backlog                 100
-  instances               1
-  priority                0
-  memSoftLimit            2047M
-  memHardLimit            2047M
-  procSoftLimit           1400
-  procHardLimit           1500
-}
-EXTEOF
-  log "lsphp81 extprocessor added"
-fi
-
-# Add HTTP listener on port 80
-if ! grep -q "listener HTTP" "$OLS_CONF"; then
-  cat >> "$OLS_CONF" <<'LSTEOF'
-
-listener HTTP {
-  address                 *:80
-  secure                  0
-}
-LSTEOF
-  log "HTTP listener port 80 added"
-fi
-
-# Update default lsphp path to lsphp81
-sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
-
-# Update Example vhost to use lsphp81 (for phpMyAdmin)
-EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
-if [ -f "$EXAMPLE_VHCONF" ]; then
-  # Backup
-  cp "$EXAMPLE_VHCONF" "$EXAMPLE_VHCONF.bak"
-  
-  # Ensure script handler for PHP
-  if ! grep -q "scripthandler" "$EXAMPLE_VHCONF"; then
-    cat >> "$EXAMPLE_VHCONF" <<'VHEOF'
-
-scripthandler  {
-  add                     lsapi:lsphp81 php
-}
-VHEOF
-  else
-    sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
-  fi
-  
-  # Ensure index files include index.php
-  if ! grep -q "index.php" "$EXAMPLE_VHCONF"; then
-    sed -i '/indexFiles/c\  indexFiles              index.php, index.html' "$EXAMPLE_VHCONF"
-  fi
-  
-  log "Example vhost updated to lsphp81"
-fi
-
-systemctl enable lsws > /dev/null 2>&1
-systemctl start lsws 2>/dev/null
-sleep 2
-
-if systemctl is-active --quiet lsws 2>/dev/null; then
-  log "OpenLiteSpeed started successfully"
-else
-  warn "OpenLiteSpeed failed to start - checking..."
-  systemctl status lsws --no-pager 2>&1 | tail -5
-  warn "Trying restart..."
-  systemctl restart lsws 2>/dev/null
-  sleep 2
-  if systemctl is-active --quiet lsws 2>/dev/null; then
-    log "OpenLiteSpeed started on retry"
-  else
-    err "OpenLiteSpeed won't start. Check: systemctl status lsws"
-  fi
-fi
 
 ########################################
 step "Step 4/10: Install MariaDB"

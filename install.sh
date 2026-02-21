@@ -1,11 +1,11 @@
 #!/bin/bash
 ############################################
-# LitePanel Installer v2.1 (Production)
+# LitePanel Installer v2.2 (Production)
 # Fresh Ubuntu 22.04 LTS Only
-# REVISED: Full phpMyAdmin fix + hardening
+# FIX: Removed set -euo pipefail
+# FIX: Per-package PHP install with validation
 ############################################
 
-set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 # === LOGGING ===
@@ -25,7 +25,7 @@ SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$SERVER_IP" ] && SERVER_IP=$(ip route get 1 2>/dev/null | awk '{print $7;exit}')
 [ -z "$SERVER_IP" ] && SERVER_IP="127.0.0.1"
 
-# Pinned phpMyAdmin version (latest stable 5.2.x branch)
+# Pinned phpMyAdmin version
 PMA_VERSION="5.2.2"
 PMA_URL="https://files.phpmyadmin.net/phpMyAdmin/${PMA_VERSION}/phpMyAdmin-${PMA_VERSION}-all-languages.tar.gz"
 PMA_FALLBACK_URL="https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz"
@@ -65,7 +65,6 @@ safe_backup() {
   local file="$1"
   if [ -f "$file" ]; then
     cp -f "$file" "${file}.bak.$(date +%Y%m%d%H%M%S)"
-    log "Backup created: ${file}.bak.*"
   fi
 }
 
@@ -100,7 +99,7 @@ done
 clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════════╗"
-echo "  ║   LitePanel Installer v2.1 (Revised) ║"
+echo "  ║   LitePanel Installer v2.2 (Fixed)   ║"
 echo "  ║   Ubuntu 22.04 LTS                   ║"
 echo "  ╚══════════════════════════════════════╝"
 echo -e "${N}"
@@ -158,7 +157,6 @@ if [ "$REPO_ADDED" -eq 0 ]; then
     if [ ! -s /usr/share/keyrings/lst-debian.gpg ]; then
       cp /tmp/lst_repo.gpg /usr/share/keyrings/lst-debian.gpg 2>/dev/null
     fi
-
     echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
       > /etc/apt/sources.list.d/lst_debian_repo.list
   fi
@@ -172,7 +170,7 @@ if [ "$REPO_ADDED" -eq 0 ]; then
 fi
 
 # ============================================
-# METHOD 3: Legacy apt-key (deprecated but works)
+# METHOD 3: Legacy apt-key
 # ============================================
 if [ "$REPO_ADDED" -eq 0 ]; then
   warn "Method 2 failed, trying Method 3 (legacy apt-key)..."
@@ -191,15 +189,11 @@ if [ "$REPO_ADDED" -eq 0 ]; then
   fi
 fi
 
-# ============================================
-# FINAL CHECK: Abort if repo failed
-# ============================================
 if [ "$REPO_ADDED" -eq 0 ]; then
   err "═══════════════════════════════════════════════"
   err "FATAL: Could not add LiteSpeed repository!"
   err "Please run manually:"
   err "  wget -O - https://repo.litespeed.sh | sudo bash"
-  err "  apt-get install openlitespeed lsphp81"
   err "Then re-run this installer."
   err "═══════════════════════════════════════════════"
   exit 1
@@ -217,64 +211,98 @@ if [ $OLS_RC -ne 0 ] || [ ! -d "/usr/local/lsws" ]; then
   err "FATAL: OpenLiteSpeed installation failed!"
   err "Exit code: $OLS_RC"
   err "Last 30 lines of install log:"
-  echo ""
   tail -30 /tmp/ols_install.log
-  echo ""
   err "═══════════════════════════════════════════════"
   exit 1
 fi
 log "OpenLiteSpeed installed"
 
 # ============================================
-# INSTALL PHP 8.1 — REQUIRED packages FIRST
-# (FIX: mbstring is CRITICAL for phpMyAdmin)
+# INSTALL PHP 8.1 — ONE BY ONE with error capture
+# FIX: No more silent bulk install failure
 # ============================================
-log "Installing PHP 8.1 (required packages)..."
-apt-get install -y lsphp81 lsphp81-common lsphp81-mysql \
-  lsphp81-curl lsphp81-mbstring > /tmp/php_install.log 2>&1
-PHP_RC=$?
+log "Installing PHP 8.1 packages (one by one)..."
 
-if [ $PHP_RC -ne 0 ]; then
-  err "Required PHP packages failed to install!"
-  tail -10 /tmp/php_install.log
-  exit 1
+PHP_REQUIRED="lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl lsphp81-mbstring"
+PHP_OPTIONAL="lsphp81-xml lsphp81-zip lsphp81-intl lsphp81-opcache"
+PHP_FAIL_REQUIRED=0
+
+for pkg in $PHP_REQUIRED; do
+  # Check if already installed
+  if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    log "  $pkg: already installed ✓"
+    continue
+  fi
+
+  echo -n "  Installing $pkg... "
+  apt-get install -y "$pkg" > "/tmp/php_${pkg}.log" 2>&1
+  RC=$?
+
+  if [ $RC -eq 0 ] && dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    echo -e "${G}OK${N}"
+  else
+    echo -e "${R}FAILED (exit code: $RC)${N}"
+    err "  Error log for $pkg:"
+    tail -5 "/tmp/php_${pkg}.log" 2>/dev/null
+    PHP_FAIL_REQUIRED=1
+  fi
+done
+
+if [ $PHP_FAIL_REQUIRED -eq 1 ]; then
+  err "═══════════════════════════════════════════════"
+  err "One or more REQUIRED PHP packages failed!"
+  err "Attempting bulk install as fallback..."
+  err "═══════════════════════════════════════════════"
+
+  # Fallback: try installing what we can
+  apt-get install -y lsphp81 lsphp81-common lsphp81-mysql 2>&1 | tail -5
+  echo ""
+
+  # Check if minimum viable PHP exists
+  if [ ! -f "/usr/local/lsws/lsphp81/bin/php" ]; then
+    err "FATAL: lsphp81 binary not found. Cannot continue."
+    err "Try manually: apt-get install lsphp81 lsphp81-common"
+    exit 1
+  else
+    warn "Continuing with partial PHP installation..."
+  fi
 fi
 
-# Optional PHP extensions (OK if some fail)
-# NOTE: lsphp81-iconv does NOT exist as separate package (bundled in common)
-apt-get install -y -qq lsphp81-xml lsphp81-zip \
-  lsphp81-intl lsphp81-opcache >> /tmp/php_install.log 2>&1
+# Optional packages (OK if some fail)
+for pkg in $PHP_OPTIONAL; do
+  if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    continue
+  fi
+  apt-get install -y -qq "$pkg" > /dev/null 2>&1
+  if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    log "  $pkg: installed (optional) ✓"
+  else
+    warn "  $pkg: not available (optional, non-critical)"
+  fi
+done
 
 # ============================================
-# VERIFY CRITICAL PHP EXTENSIONS
+# VERIFY PHP BINARY AND EXTENSIONS
 # ============================================
 if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
   ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
   PHP_VER=$(/usr/local/lsws/lsphp81/bin/php -v 2>/dev/null | head -1 | awk '{print $2}')
-  log "PHP 8.1 installed ($PHP_VER)"
+  log "PHP binary: /usr/local/lsws/lsphp81/bin/php ($PHP_VER)"
 
-  # Verify critical extensions required by phpMyAdmin
-  REQUIRED_EXTS="mysqli mbstring json session"
-  MISSING_EXTS=""
-  for ext in $REQUIRED_EXTS; do
-    if /usr/local/lsws/lsphp81/bin/php -m 2>/dev/null | grep -qi "^${ext}$"; then
-      log "  PHP extension ${ext}: ✓ loaded"
+  echo ""
+  echo -e "${B}PHP Extension Verification:${N}"
+  LOADED_EXTS=$(/usr/local/lsws/lsphp81/bin/php -m 2>/dev/null)
+  for ext in mysqli mbstring json session curl openssl; do
+    if echo "$LOADED_EXTS" | grep -qi "^${ext}$"; then
+      echo -e "  ${G}[✓]${N} $ext"
     else
-      err "  PHP extension ${ext}: ✗ MISSING"
-      MISSING_EXTS="${MISSING_EXTS} ${ext}"
+      echo -e "  ${R}[✗]${N} $ext MISSING"
     fi
   done
-
-  if [ -n "$MISSING_EXTS" ]; then
-    err "Critical PHP extensions missing:${MISSING_EXTS}"
-    err "phpMyAdmin will NOT work without these!"
-    warn "Attempting to install missing extensions..."
-    for ext in $MISSING_EXTS; do
-      apt-get install -y -qq "lsphp81-${ext}" 2>/dev/null
-    done
-  fi
+  echo ""
 else
-  err "lsphp81 binary not found at /usr/local/lsws/lsphp81/bin/php"
+  err "lsphp81 binary not found!"
+  err "Installation cannot continue without PHP."
   exit 1
 fi
 
@@ -297,11 +325,9 @@ if [ -d "/usr/local/lsws/admin/conf" ]; then
   echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
   chmod 600 /usr/local/lsws/admin/conf/htpasswd
   log "OLS admin password set"
-else
-  warn "OLS admin conf directory not found"
 fi
 
-# Add lsphp81 extprocessor (only if not already present)
+# Add lsphp81 extprocessor (only if not present)
 if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'EXTEOF'
 
@@ -326,10 +352,10 @@ extprocessor lsphp81 {
   procHardLimit           1500
 }
 EXTEOF
-  log "lsphp81 extprocessor added (pcKeepAliveTimeout=15)"
+  log "lsphp81 extprocessor added"
 fi
 
-# Add HTTP listener on port 80 (only if not present)
+# Add HTTP listener on port 80
 if ! grep -q "listener HTTP" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'LSTEOF'
 
@@ -344,14 +370,11 @@ fi
 # Update default lsphp path to lsphp81
 sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
 
-# Update Example vhost to use lsphp81
+# Update Example vhost
 EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
 if [ -f "$EXAMPLE_VHCONF" ]; then
   safe_backup "$EXAMPLE_VHCONF"
-  # Replace any lsapi:lsphp reference with lsapi:lsphp81
   sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
-
-  # Ensure index.php is in the index files list
   if ! grep -q "index.php" "$EXAMPLE_VHCONF"; then
     sed -i '/indexFiles/s/index.html/index.php, index.html/' "$EXAMPLE_VHCONF"
   fi
@@ -362,13 +385,13 @@ systemctl enable lsws > /dev/null 2>&1
 systemctl start lsws 2>/dev/null
 sleep 2
 
-if verify_service lsws; then
+if systemctl is-active --quiet lsws 2>/dev/null; then
   log "OpenLiteSpeed started successfully"
 else
   warn "OpenLiteSpeed failed to start - retrying..."
   systemctl restart lsws 2>/dev/null
   sleep 3
-  if ! verify_service lsws; then
+  if ! systemctl is-active --quiet lsws 2>/dev/null; then
     err "OpenLiteSpeed won't start. Check: journalctl -u lsws --no-pager -n 20"
     systemctl status lsws --no-pager 2>&1 | tail -10
   fi
@@ -377,9 +400,15 @@ fi
 ########################################
 step "Step 4/9: Install MariaDB"
 ########################################
-apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
-systemctl enable mariadb > /dev/null 2>&1
-systemctl start mariadb
+
+# Skip install if already running
+if systemctl is-active --quiet mariadb 2>/dev/null; then
+  log "MariaDB already running (skipping install)"
+else
+  apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
+  systemctl enable mariadb > /dev/null 2>&1
+  systemctl start mariadb
+fi
 
 # Wait for MariaDB to be ready
 for i in $(seq 1 20); do
@@ -392,34 +421,41 @@ done
 
 if ! mysqladmin ping &>/dev/null; then
   err "MariaDB failed to start after 40 seconds!"
-  systemctl status mariadb --no-pager | tail -10
+  systemctl status mariadb --no-pager 2>&1 | tail -10
   exit 1
 fi
 
+log "MariaDB is running"
+
 # ============================================
-# DETECT MARIADB SOCKET PATH (used later for PHP config)
+# DETECT SOCKET PATH
 # ============================================
 MYSQL_SOCKET=$(mysqladmin variables 2>/dev/null | grep -w "socket" | awk '{print $4}')
-[ -z "$MYSQL_SOCKET" ] && MYSQL_SOCKET="/var/run/mysqld/mysqld.sock"
-log "MariaDB socket detected: $MYSQL_SOCKET"
+if [ -z "$MYSQL_SOCKET" ]; then
+  # Fallback detection
+  MYSQL_SOCKET=$(mysql -u root -e "SELECT @@socket;" -s -N 2>/dev/null)
+fi
+if [ -z "$MYSQL_SOCKET" ]; then
+  MYSQL_SOCKET="/var/run/mysqld/mysqld.sock"
+fi
+log "MariaDB socket: $MYSQL_SOCKET"
 
 # ============================================
-# FIX: Explicitly set mysql_native_password plugin
-# This ensures phpMyAdmin can authenticate via password
+# FIX AUTH: Explicit mysql_native_password
 # ============================================
-log "Securing MariaDB (explicit mysql_native_password)..."
+log "Securing MariaDB with mysql_native_password..."
 
-mysql -u root <<SQLEOF 2>/tmp/mariadb_setup.log
--- Switch root to mysql_native_password explicitly
+mysql -u root <<SQLEOF > /tmp/mariadb_setup.log 2>&1
+-- Switch root to mysql_native_password
 ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${DB_ROOT_PASS}');
 -- Remove anonymous users
 DELETE FROM mysql.user WHERE User='';
 -- Remove remote root
 DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
--- Remove test database
+-- Drop test DB
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
--- Create dedicated phpMyAdmin admin user
+-- Create dedicated phpMyAdmin user
 CREATE USER IF NOT EXISTS '${PMA_ADMIN_USER}'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${PMA_ADMIN_PASS}');
 GRANT ALL PRIVILEGES ON *.* TO '${PMA_ADMIN_USER}'@'localhost' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
@@ -428,55 +464,63 @@ SQLEOF
 MYSQL_SETUP_RC=$?
 
 if [ $MYSQL_SETUP_RC -ne 0 ]; then
-  err "MariaDB setup SQL returned error code: $MYSQL_SETUP_RC"
+  warn "MariaDB setup returned code $MYSQL_SETUP_RC"
+  warn "Setup log:"
   cat /tmp/mariadb_setup.log
-  warn "Trying fallback method..."
+  echo ""
 
-  # Fallback: use SET PASSWORD (older syntax)
+  warn "Trying fallback method..."
   mysql -u root -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${DB_ROOT_PASS}');" 2>/dev/null
 fi
 
 # ============================================
-# VERIFY MariaDB root password authentication works
+# VERIFY AUTH
 # ============================================
 sleep 1
 if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-  log "MariaDB root password authentication VERIFIED ✓"
+  log "MariaDB root password auth: VERIFIED ✓"
 else
-  err "MariaDB root password authentication FAILED!"
-  warn "Attempting alternative fix..."
-
-  # Alternative: connect via unix_socket and force the change
+  warn "Root password auth check failed. Trying global_priv fallback..."
   mysql -u root -e "
     UPDATE mysql.global_priv SET priv=json_set(priv, '$.plugin', 'mysql_native_password', '$.authentication_string', PASSWORD('${DB_ROOT_PASS}')) WHERE User='root' AND Host='localhost';
     FLUSH PRIVILEGES;
   " 2>/dev/null
-
   sleep 1
+
   if mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-    log "MariaDB root password authentication VERIFIED (fallback) ✓"
+    log "MariaDB root password auth: VERIFIED (fallback) ✓"
   else
-    err "WARNING: Root password auth still failing. phpMyAdmin may not work with root."
-    warn "Use dedicated user '${PMA_ADMIN_USER}' instead."
+    err "WARNING: Root password auth STILL failing."
+    warn "Use dedicated user '${PMA_ADMIN_USER}' for phpMyAdmin."
   fi
 fi
 
-# Verify dedicated PMA user
 if mysql -u "${PMA_ADMIN_USER}" -p"${PMA_ADMIN_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-  log "Dedicated phpMyAdmin user '${PMA_ADMIN_USER}' VERIFIED ✓"
+  log "Dedicated PMA user '${PMA_ADMIN_USER}': VERIFIED ✓"
 else
-  warn "Dedicated PMA user verification failed - check manually"
+  warn "PMA user verification failed - may need manual setup"
 fi
 
-log "MariaDB installed & secured"
+log "MariaDB secured"
 
 # ============================================
-# FIX: Configure lsphp81 php.ini for correct MySQL socket
+# FIX lsphp81 php.ini socket path
 # ============================================
-LSPHP_INI="/usr/local/lsws/lsphp81/etc/php/8.1/litespeed/php.ini"
-if [ -f "$LSPHP_INI" ]; then
+LSPHP_INI=""
+for candidate in \
+  "/usr/local/lsws/lsphp81/etc/php/8.1/litespeed/php.ini" \
+  "/usr/local/lsws/lsphp81/etc/php/8.1/mods-available/mysqli.ini" \
+  "/usr/local/lsws/lsphp81/etc/php.ini" \
+  "/usr/local/lsws/lsphp81/lib/php.ini"; do
+  if [ -f "$candidate" ]; then
+    LSPHP_INI="$candidate"
+    break
+  fi
+done
+
+if [ -n "$LSPHP_INI" ]; then
   safe_backup "$LSPHP_INI"
-  log "Configuring lsphp81 php.ini for MariaDB socket..."
+  log "Configuring PHP socket in: $LSPHP_INI"
 
   # Fix mysqli.default_socket
   if grep -q "^mysqli.default_socket" "$LSPHP_INI"; then
@@ -484,6 +528,7 @@ if [ -f "$LSPHP_INI" ]; then
   elif grep -q "^;mysqli.default_socket" "$LSPHP_INI"; then
     sed -i "s|^;mysqli.default_socket.*|mysqli.default_socket = ${MYSQL_SOCKET}|" "$LSPHP_INI"
   else
+    echo "" >> "$LSPHP_INI"
     echo "mysqli.default_socket = ${MYSQL_SOCKET}" >> "$LSPHP_INI"
   fi
 
@@ -496,45 +541,27 @@ if [ -f "$LSPHP_INI" ]; then
     echo "pdo_mysql.default_socket = ${MYSQL_SOCKET}" >> "$LSPHP_INI"
   fi
 
-  # Fix mysql.default_socket (legacy)
-  if grep -q "^mysql.default_socket" "$LSPHP_INI"; then
-    sed -i "s|^mysql.default_socket.*|mysql.default_socket = ${MYSQL_SOCKET}|" "$LSPHP_INI"
-  elif grep -q "^;mysql.default_socket" "$LSPHP_INI"; then
-    sed -i "s|^;mysql.default_socket.*|mysql.default_socket = ${MYSQL_SOCKET}|" "$LSPHP_INI"
-  fi
-
-  # Verify the change
-  CONFIGURED_SOCKET=$(grep "^mysqli.default_socket" "$LSPHP_INI" | awk -F= '{print $2}' | tr -d ' ')
-  log "lsphp81 mysqli.default_socket set to: $CONFIGURED_SOCKET"
+  log "PHP socket set to: $MYSQL_SOCKET"
 else
-  warn "lsphp81 php.ini not found at $LSPHP_INI"
-  # Try alternative paths
-  for alt_ini in \
-    /usr/local/lsws/lsphp81/etc/php.ini \
-    /usr/local/lsws/lsphp81/lib/php.ini; do
-    if [ -f "$alt_ini" ]; then
-      warn "Found alternative php.ini: $alt_ini"
-      echo "mysqli.default_socket = ${MYSQL_SOCKET}" >> "$alt_ini"
-      echo "pdo_mysql.default_socket = ${MYSQL_SOCKET}" >> "$alt_ini"
-      log "Socket path appended to $alt_ini"
-      break
-    fi
-  done
+  warn "Could not find lsphp81 php.ini!"
+  warn "Searching all possible locations..."
+  find /usr/local/lsws/lsphp81/ -name "php.ini" -type f 2>/dev/null
+  warn "phpMyAdmin will use 127.0.0.1 (TCP) as fallback"
 fi
 
 ########################################
 step "Step 5/9: Install Node.js 20 LTS"
 ########################################
 if ! command -v node > /dev/null 2>&1; then
+  log "Installing Node.js 20 LTS..."
   curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - > /dev/null 2>&1
   apt-get install -y -qq nodejs > /dev/null 2>&1
 fi
 
-if verify_command node "Node.js"; then
+if command -v node > /dev/null 2>&1; then
   log "Node.js $(node -v 2>/dev/null) installed"
 else
   err "Node.js installation failed!"
-  err "Manual install: curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt install nodejs"
   exit 1
 fi
 
@@ -548,7 +575,7 @@ cd ${PANEL_DIR}
 cat > package.json <<'PKGEOF'
 {
   "name": "litepanel",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "scripts": { "start": "node app.js" },
   "dependencies": {
@@ -565,7 +592,7 @@ npm install --production > /tmp/npm_install.log 2>&1
 NPM_RC=$?
 
 if [ $NPM_RC -ne 0 ]; then
-  warn "npm install failed (code $NPM_RC), retrying with legacy-peer-deps..."
+  warn "npm install failed (code $NPM_RC), retrying..."
   npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
   NPM_RC=$?
 fi
@@ -591,7 +618,7 @@ cat > config.json <<CFGEOF
 }
 CFGEOF
 chmod 600 config.json
-log "config.json created (permissions: 600)"
+log "config.json created"
 
 ##############################################
 # -------- app.js (Backend) --------
@@ -639,7 +666,6 @@ function svcActive(name) {
 function escRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function shellEsc(s) { return s.replace(/'/g, "'\\''"); }
 
-/* === OLS Config Management === */
 function readOLSConf() { return fs.readFileSync(OLS_CONF, 'utf8'); }
 function writeOLSConf(content) {
   fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
@@ -649,7 +675,6 @@ function writeOLSConf(content) {
 function addDomainToOLS(domain) {
   var httpd = readOLSConf();
   if (httpd.includes('virtualhost ' + domain + ' {')) return;
-
   httpd += '\nvirtualhost ' + domain + ' {\n'
     + '  vhRoot                  ' + OLS_VHOST_DIR + '/' + domain + '\n'
     + '  configFile              ' + OLS_VHOST_CONF_DIR + '/' + domain + '/vhconf.conf\n'
@@ -657,7 +682,6 @@ function addDomainToOLS(domain) {
     + '  enableScript            1\n'
     + '  restrained              1\n'
     + '}\n';
-
   var listenerRe = /(listener\s+HTTP\s*\{[\s\S]*?)(})/;
   if (listenerRe.test(httpd)) {
     httpd = httpd.replace(listenerRe,
@@ -687,7 +711,6 @@ function createVhostFiles(domain) {
   fs.mkdirSync(confDir, { recursive: true });
   fs.mkdirSync(docRoot, { recursive: true });
   fs.mkdirSync(logDir,  { recursive: true });
-
   var vhConf = 'docRoot                   $VH_ROOT/html\n'
     + 'vhDomain                  ' + domain + '\n'
     + 'vhAliases                 www.' + domain + '\n'
@@ -707,7 +730,6 @@ function createVhostFiles(domain) {
     + '  enable                  1\n'
     + '  autoLoadHtaccess        1\n'
     + '}\n';
-
   fs.writeFileSync(path.join(confDir, 'vhconf.conf'), vhConf);
   fs.writeFileSync(path.join(docRoot, 'index.html'),
     '<!DOCTYPE html>\n<html><head><title>' + domain + '</title></head>\n'
@@ -732,7 +754,6 @@ function safeRestartOLS() {
   } catch(e) { throw e; }
 }
 
-/* === Auth === */
 app.post('/api/login', function(req, res) {
   var u = req.body.username, p = req.body.password;
   if (u === config.adminUser && bcrypt.compareSync(p, config.adminPass)) {
@@ -742,7 +763,6 @@ app.post('/api/login', function(req, res) {
 app.get('/api/logout', function(req, res) { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/auth', function(req, res) { res.json({ authenticated: !!(req.session && req.session.user) }); });
 
-/* === Dashboard === */
 app.get('/api/dashboard', auth, function(req, res) {
   var tm = os.totalmem(), fm = os.freemem();
   var disk = { total: 0, used: 0, free: 0 };
@@ -756,7 +776,6 @@ app.get('/api/dashboard', auth, function(req, res) {
   });
 });
 
-/* === Services === */
 app.get('/api/services', auth, function(req, res) {
   res.json(['lsws','mariadb','fail2ban','cloudflared'].map(function(s) { return { name: s, active: svcActive(s) }; }));
 });
@@ -768,7 +787,6 @@ app.post('/api/services/:name/:action', auth, function(req, res) {
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === File Manager === */
 app.get('/api/files', auth, function(req, res) {
   var p = path.resolve(req.query.path || '/');
   try {
@@ -822,7 +840,6 @@ app.get('/api/files/download', auth, function(req, res) {
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Domains === */
 app.get('/api/domains', auth, function(req, res) {
   try {
     if (!fs.existsSync(OLS_VHOST_CONF_DIR)) return res.json([]);
@@ -855,7 +872,6 @@ app.delete('/api/domains/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Databases === */
 app.get('/api/databases', auth, function(req, res) {
   try {
     var out = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
@@ -885,7 +901,6 @@ app.delete('/api/databases/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Tunnel === */
 app.get('/api/tunnel/status', auth, function(req, res) { res.json({ active: svcActive('cloudflared') }); });
 app.post('/api/tunnel/setup', auth, function(req, res) {
   var token = req.body.token;
@@ -899,7 +914,6 @@ app.post('/api/tunnel/setup', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Settings === */
 app.post('/api/settings/password', auth, function(req, res) {
   if (!bcrypt.compareSync(req.body.currentPassword, config.adminPass))
     return res.status(401).json({ error: 'Wrong current password' });
@@ -910,7 +924,6 @@ app.post('/api/settings/password', auth, function(req, res) {
   res.json({ success: true });
 });
 
-/* === Terminal === */
 app.post('/api/terminal', auth, function(req, res) {
   if (!req.body.command) return res.json({ output: '' });
   try { res.json({ output: run(req.body.command, 30000) }); }
@@ -1326,24 +1339,20 @@ step "Step 7/9: Install phpMyAdmin"
 ########################################
 PMA_DIR="/usr/local/lsws/Example/html/phpmyadmin"
 
-# Skip if already installed and working
 if [ -f "${PMA_DIR}/index.php" ] && [ -f "${PMA_DIR}/config.inc.php" ]; then
-  warn "phpMyAdmin already exists at ${PMA_DIR}, will reconfigure"
+  warn "phpMyAdmin already exists, will reconfigure"
 fi
 
 mkdir -p "${PMA_DIR}"
 cd /tmp
 
-# ============================================
-# FIX: Download pinned version first, fallback to latest
-# ============================================
 PMA_DOWNLOADED=0
 
 log "Downloading phpMyAdmin ${PMA_VERSION}..."
 wget -q "${PMA_URL}" -O pma.tar.gz 2>/dev/null
 if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
   PMA_DOWNLOADED=1
-  log "phpMyAdmin ${PMA_VERSION} downloaded (pinned version)"
+  log "phpMyAdmin ${PMA_VERSION} downloaded (pinned)"
 else
   warn "Pinned version failed, trying latest..."
   wget -q "${PMA_FALLBACK_URL}" -O pma.tar.gz 2>/dev/null
@@ -1355,50 +1364,39 @@ fi
 
 if [ "$PMA_DOWNLOADED" -eq 1 ]; then
   tar xzf pma.tar.gz 2>/dev/null
-  # FIX: Use rsync-like copy to include hidden files, or use find
+
   if ls -d phpMyAdmin-*/ > /dev/null 2>&1; then
     PMA_EXTRACT_DIR=$(ls -d phpMyAdmin-*/ | head -1)
-    # Copy ALL files including hidden ones
+    # Copy ALL files including hidden
     cp -af "${PMA_EXTRACT_DIR}"/* "${PMA_DIR}/" 2>/dev/null
     cp -af "${PMA_EXTRACT_DIR}"/.* "${PMA_DIR}/" 2>/dev/null || true
     rm -rf phpMyAdmin-* pma.tar.gz
+    log "phpMyAdmin files extracted"
   else
-    err "phpMyAdmin extraction failed - no phpMyAdmin-* directory found"
+    err "phpMyAdmin extraction failed"
     rm -f pma.tar.gz
   fi
 
-  # ============================================
-  # FIX: Create phpMyAdmin tmp directory (REQUIRED by 5.x+)
-  # ============================================
+  # Create tmp directory
   mkdir -p "${PMA_DIR}/tmp"
 
-  # ============================================
-  # FIX: Generate proper blowfish secret (32+ chars)
-  # ============================================
+  # Generate proper blowfish secret
   BLOWFISH=$(openssl rand -base64 36 | tr -dc 'A-Za-z0-9' | head -c 32)
 
-  # ============================================
-  # FIX: Complete phpMyAdmin config with:
-  #   - 127.0.0.1 (TCP) to bypass socket path issues
-  #   - Explicit socket path as fallback
-  #   - TempDir set
-  #   - Proper security settings
-  # ============================================
+  # Write complete config
   cat > ${PMA_DIR}/config.inc.php <<PMAEOF
 <?php
 /**
- * phpMyAdmin Configuration - Generated by LitePanel Installer
- * Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+ * phpMyAdmin Configuration - Generated by LitePanel v2.2
  */
 
 \$cfg['blowfish_secret'] = '${BLOWFISH}';
 \$cfg['TempDir'] = '${PMA_DIR}/tmp';
 
-/* Server configuration */
 \$i = 0;
 \$i++;
 
-/* FIX: Use 127.0.0.1 to force TCP connection (bypasses socket path mismatch) */
+/* Force TCP to bypass socket path mismatch */
 \$cfg['Servers'][\$i]['host'] = '127.0.0.1';
 \$cfg['Servers'][\$i]['port'] = '3306';
 \$cfg['Servers'][\$i]['socket'] = '${MYSQL_SOCKET}';
@@ -1408,73 +1406,48 @@ if [ "$PMA_DOWNLOADED" -eq 1 ]; then
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
 \$cfg['Servers'][\$i]['compress'] = false;
 
-/* Security settings */
 \$cfg['LoginCookieValidity'] = 28800;
-\$cfg['LoginCookieStore'] = 0;
-\$cfg['LoginCookieDeleteAll'] = true;
-
-/* Upload/Memory limits */
 \$cfg['ExecTimeLimit'] = 600;
 \$cfg['UploadDir'] = '';
 \$cfg['SaveDir'] = '';
-\$cfg['MaxRows'] = 100;
-
-/* Disable version check (reduces external requests) */
 \$cfg['VersionCheck'] = false;
 PMAEOF
 
-  # ============================================
-  # FIX: Set correct ownership and permissions
-  # ============================================
+  # Fix ownership and permissions
   chown -R nobody:nogroup "${PMA_DIR}"
   chmod 755 "${PMA_DIR}"
   chmod 644 "${PMA_DIR}/config.inc.php"
   chmod 770 "${PMA_DIR}/tmp"
   chown nobody:nogroup "${PMA_DIR}/tmp"
 
-  log "phpMyAdmin installed and configured"
+  log "phpMyAdmin configured"
 else
   err "phpMyAdmin download failed from all sources"
 fi
 
 # ============================================
-# VERIFY phpMyAdmin can connect to MariaDB via PHP
+# VERIFY phpMyAdmin PHP→MariaDB connectivity
 # ============================================
-log "Verifying phpMyAdmin PHP→MariaDB connectivity..."
+log "Testing phpMyAdmin connectivity..."
 
 PMA_TEST_SCRIPT=$(mktemp /tmp/pma_test_XXXX.php)
-cat > "$PMA_TEST_SCRIPT" <<'PHPTEST'
+cat > "$PMA_TEST_SCRIPT" <<PHPTEST
 <?php
-// Test 1: Required extensions
-$required = ['mysqli', 'mbstring', 'json', 'session'];
-$missing = [];
-foreach ($required as $ext) {
-    if (!extension_loaded($ext)) $missing[] = $ext;
+\$required = ['mysqli', 'mbstring', 'json', 'session'];
+\$missing = [];
+foreach (\$required as \$ext) {
+    if (!extension_loaded(\$ext)) \$missing[] = \$ext;
 }
-if ($missing) {
-    echo "FAIL:EXTENSIONS:" . implode(',', $missing);
+if (\$missing) {
+    echo "FAIL:EXTENSIONS:" . implode(',', \$missing);
     exit(1);
 }
-
-// Test 2: TCP connection to MariaDB
-$conn = @new mysqli('127.0.0.1', 'root', '', '', 3306);
-if ($conn->connect_error) {
-    echo "FAIL:TCP:" . $conn->connect_error;
+\$conn = @new mysqli('127.0.0.1', '${PMA_ADMIN_USER}', '${PMA_ADMIN_PASS}', '', 3306);
+if (\$conn->connect_error) {
+    echo "FAIL:TCP:" . \$conn->connect_error;
     exit(1);
 }
-$conn->close();
-
-// Test 3: Socket connection to MariaDB
-$socket = '/var/run/mysqld/mysqld.sock';
-if (file_exists($socket)) {
-    $conn2 = @new mysqli('localhost', 'root', '', '', 0, $socket);
-    if ($conn2->connect_error) {
-        echo "WARN:SOCKET:" . $conn2->connect_error;
-    } else {
-        $conn2->close();
-    }
-}
-
+\$conn->close();
 echo "OK";
 PHPTEST
 
@@ -1487,23 +1460,15 @@ case "$PMA_TEST_RESULT" in
     ;;
   FAIL:EXTENSIONS:*)
     MISSING=$(echo "$PMA_TEST_RESULT" | cut -d: -f3)
-    err "phpMyAdmin test FAILED: Missing PHP extensions: $MISSING"
-    warn "Attempting to install missing extensions..."
-    for ext in $(echo "$MISSING" | tr ',' ' '); do
-      apt-get install -y -qq "lsphp81-${ext}" 2>/dev/null
-    done
+    err "Missing PHP extensions: $MISSING"
     ;;
   FAIL:TCP:*)
     ERR_MSG=$(echo "$PMA_TEST_RESULT" | cut -d: -f3-)
-    err "phpMyAdmin test FAILED: TCP connection error: $ERR_MSG"
-    warn "MariaDB may not be listening on TCP port 3306"
+    err "TCP connection error: $ERR_MSG"
     warn "Check: ss -tlnp | grep 3306"
     ;;
-  WARN:SOCKET:*)
-    warn "TCP works but socket connection has issues (non-critical with TCP config)"
-    ;;
   *)
-    warn "phpMyAdmin test returned unexpected result: $PMA_TEST_RESULT"
+    warn "Unexpected test result: $PMA_TEST_RESULT"
     ;;
 esac
 
@@ -1512,7 +1477,6 @@ step "Step 8/9: Install Cloudflared + Fail2Ban"
 ########################################
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 
-# Only install if not already present
 if ! command -v cloudflared > /dev/null 2>&1; then
   cd /tmp
   if [ "$ARCH" = "arm64" ]; then
@@ -1529,23 +1493,20 @@ if ! command -v cloudflared > /dev/null 2>&1; then
     err "Cloudflared download failed"
   fi
 else
-  log "Cloudflared already installed ($(cloudflared --version 2>/dev/null | head -1))"
+  log "Cloudflared already installed"
 fi
 
-if ! dpkg -l fail2ban > /dev/null 2>&1; then
+if ! dpkg -l fail2ban 2>/dev/null | grep -q "^ii"; then
   apt-get install -y -qq fail2ban > /dev/null 2>&1
 fi
 systemctl enable fail2ban > /dev/null 2>&1
 systemctl start fail2ban 2>/dev/null
-log "Fail2Ban installed and enabled"
+log "Fail2Ban enabled"
 
 ########################################
 step "Step 9/9: Configure Firewall + Start Services"
 ########################################
 
-# ============================================
-# Create systemd service for LitePanel
-# ============================================
 cat > /etc/systemd/system/litepanel.service <<SVCEOF
 [Unit]
 Description=LitePanel Control Panel
@@ -1567,11 +1528,8 @@ systemctl daemon-reload
 systemctl enable litepanel > /dev/null 2>&1
 systemctl restart litepanel
 
-# ============================================
-# FIX: UFW - Add rules WITHOUT resetting existing ones
-# ============================================
-log "Configuring firewall (additive, no reset)..."
-
+# Firewall — additive, NO reset
+log "Configuring firewall..."
 ufw default deny incoming > /dev/null 2>&1
 ufw default allow outgoing > /dev/null 2>&1
 
@@ -1580,38 +1538,22 @@ for port in ${REQUIRED_PORTS}; do
   ufw allow "${port}/tcp" > /dev/null 2>&1
 done
 
-# Enable only if not already enabled
-if ! ufw status | grep -q "Status: active"; then
+if ! ufw status 2>/dev/null | grep -q "Status: active"; then
   ufw --force enable > /dev/null 2>&1
 fi
 log "Firewall configured (ports: ${REQUIRED_PORTS})"
 
-# ============================================
-# SAFE RESTART: Graceful reload instead of hard restart
-# ============================================
-log "Performing safe service reload..."
-
-# Graceful restart for LSWS (preserves existing connections)
+# Safe LSWS reload
 if systemctl is-active --quiet lsws 2>/dev/null; then
   /usr/local/lsws/bin/lswsctrl restart 2>/dev/null || systemctl restart lsws 2>/dev/null
-  log "LSWS gracefully restarted"
+  log "LSWS restarted"
 else
   systemctl start lsws 2>/dev/null
 fi
 
-# MariaDB: only restart if we changed config, NOT by default
-# (restarting MariaDB can drop active connections)
-if systemctl is-active --quiet mariadb 2>/dev/null; then
-  log "MariaDB already running (not restarted to preserve connections)"
-else
-  systemctl start mariadb 2>/dev/null
-fi
-
 sleep 3
 
-# ============================================
-# SAVE CREDENTIALS
-# ============================================
+# Save credentials
 cat > /root/.litepanel_credentials <<CREDEOF
 ==========================================
   LitePanel Credentials
@@ -1667,7 +1609,6 @@ for svc in lsws mariadb litepanel fail2ban; do
   fi
 done
 
-# Verify phpMyAdmin is accessible
 echo ""
 echo -e "${B}phpMyAdmin Verification:${N}"
 if [ -f "${PMA_DIR}/index.php" ]; then
@@ -1684,10 +1625,10 @@ else
   ALL_OK=false
 fi
 
-if [ -d "${PMA_DIR}/tmp" ] && [ -w "${PMA_DIR}/tmp" ]; then
-  echo -e "  ${G}[✓]${N} tmp directory writable"
+if [ -d "${PMA_DIR}/tmp" ]; then
+  echo -e "  ${G}[✓]${N} tmp directory exists"
 else
-  echo -e "  ${R}[✗]${N} tmp directory issue"
+  echo -e "  ${R}[✗]${N} tmp directory missing"
   ALL_OK=false
 fi
 
@@ -1699,9 +1640,9 @@ else
 fi
 
 if mysql -u "${PMA_ADMIN_USER}" -p"${PMA_ADMIN_PASS}" -e "SELECT 1;" > /dev/null 2>&1; then
-  echo -e "  ${G}[✓]${N} Dedicated PMA user '${PMA_ADMIN_USER}' auth works"
+  echo -e "  ${G}[✓]${N} PMA user '${PMA_ADMIN_USER}' auth works"
 else
-  echo -e "  ${R}[✗]${N} Dedicated PMA user auth FAILED"
+  echo -e "  ${R}[✗]${N} PMA user auth FAILED"
 fi
 
 LOADED_EXTS=$(/usr/local/lsws/lsphp81/bin/php -m 2>/dev/null)
@@ -1716,9 +1657,10 @@ done
 
 echo ""
 if [ "$ALL_OK" = true ]; then
-  echo -e "${G}ALL CHECKS PASSED! Open http://${SERVER_IP}:${PANEL_PORT} in your browser${N}"
+  echo -e "${G}ALL CHECKS PASSED! Open http://${SERVER_IP}:${PANEL_PORT}${N}"
 else
-  echo -e "${Y}SOME CHECKS FAILED — review output above and check ${LOG_FILE}${N}"
+  echo -e "${Y}SOME CHECKS FAILED — review output above${N}"
+  echo -e "${Y}Log file: ${LOG_FILE}${N}"
 fi
 
 echo ""

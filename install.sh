@@ -1,9 +1,7 @@
 #!/bin/bash
 ############################################
-# LitePanel Installer v2.0 (FIXED)
+# LitePanel Installer v2.0 (Production)
 # Fresh Ubuntu 22.04 LTS Only
-# Fixes: OLS config, PHP extprocessor,
-#   listener, vhost, file manager, security
 ############################################
 
 export DEBIAN_FRONTEND=noninteractive
@@ -38,11 +36,17 @@ if [ -f /etc/os-release ]; then
   fi
 fi
 
+# === WAIT FOR DPKG LOCK ===
+while fuser /var/lib/dpkg/lock-frontend > /dev/null 2>&1; do
+  warn "Waiting for other package manager to finish..."
+  sleep 3
+done
+
 clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
 echo "  ║   LitePanel Installer v2.0       ║"
-echo "  ║   Ubuntu 22.04 LTS (Fixed)       ║"
+echo "  ║   Ubuntu 22.04 LTS              ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2
@@ -65,27 +69,154 @@ log "Dependencies installed"
 ########################################
 step "Step 3/9: Install OpenLiteSpeed + PHP 8.1"
 ########################################
-wget -O - https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null | \
-  gpg --dearmor -o /usr/share/keyrings/lst-debian.gpg 2>/dev/null
 
-echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ \
-$(lsb_release -sc) main" > /etc/apt/sources.list.d/lst_debian_repo.list
+CODENAME=$(lsb_release -sc 2>/dev/null || echo "jammy")
+REPO_ADDED=0
 
-apt-get update -y -qq > /dev/null 2>&1
-apt-get install -y -qq openlitespeed lsphp81 lsphp81-common lsphp81-mysql \
-  lsphp81-curl lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-intl \
-  lsphp81-iconv lsphp81-opcache > /dev/null 2>&1
+# ============================================
+# METHOD 1: Official LiteSpeed repo script
+# (This is what LiteSpeed recommends)
+# ============================================
+log "Adding LiteSpeed repository (Method 1: official script)..."
+wget -qO /tmp/ls_repo.sh https://repo.litespeed.sh 2>/dev/null
+if [ -f /tmp/ls_repo.sh ] && [ -s /tmp/ls_repo.sh ]; then
+  bash /tmp/ls_repo.sh > /dev/null 2>&1
+  rm -f /tmp/ls_repo.sh
+  apt-get update -y -qq > /dev/null 2>&1
+fi
 
-ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
+if apt-cache show openlitespeed > /dev/null 2>&1; then
+  REPO_ADDED=1
+  log "LiteSpeed repository added (Method 1)"
+fi
 
-# ---- FIX #1: OLS Admin Password (MD5 format, like CyberPanel) ----
-OLS_HASH=$(printf '%s' "${ADMIN_PASS}" | md5sum | awk '{print $1}')
-echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
-log "OLS admin password set (MD5 format)"
+# ============================================
+# METHOD 2: Manual GPG with signed-by
+# ============================================
+if [ "$REPO_ADDED" -eq 0 ]; then
+  warn "Method 1 failed, trying Method 2 (manual GPG)..."
+  
+  wget -qO /tmp/lst_repo.gpg https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null
+  wget -qO /tmp/lst_debian_repo.gpg https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>/dev/null
+  
+  if [ -f /tmp/lst_repo.gpg ] && [ -s /tmp/lst_repo.gpg ]; then
+    # Try dearmor first, fallback to direct copy
+    gpg --dearmor < /tmp/lst_repo.gpg > /usr/share/keyrings/lst-debian.gpg 2>/dev/null
+    if [ ! -s /usr/share/keyrings/lst-debian.gpg ]; then
+      cp /tmp/lst_repo.gpg /usr/share/keyrings/lst-debian.gpg 2>/dev/null
+    fi
+    
+    echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
+      > /etc/apt/sources.list.d/lst_debian_repo.list
+  fi
+  rm -f /tmp/lst_repo.gpg /tmp/lst_debian_repo.gpg
+  apt-get update -y -qq > /dev/null 2>&1
+  
+  if apt-cache show openlitespeed > /dev/null 2>&1; then
+    REPO_ADDED=1
+    log "LiteSpeed repository added (Method 2)"
+  fi
+fi
 
-# ---- FIX #2: Add lsphp81 extprocessor to httpd_config.conf ----
+# ============================================
+# METHOD 3: Legacy apt-key (deprecated but works)
+# ============================================
+if [ "$REPO_ADDED" -eq 0 ]; then
+  warn "Method 2 failed, trying Method 3 (legacy apt-key)..."
+  
+  wget -qO - https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null | apt-key add - 2>/dev/null
+  wget -qO - https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg 2>/dev/null | apt-key add - 2>/dev/null
+  
+  echo "deb http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
+    > /etc/apt/sources.list.d/lst_debian_repo.list
+  
+  apt-get update -y -qq > /dev/null 2>&1
+  
+  if apt-cache show openlitespeed > /dev/null 2>&1; then
+    REPO_ADDED=1
+    log "LiteSpeed repository added (Method 3)"
+  fi
+fi
+
+# ============================================
+# FINAL CHECK: Abort if repo failed
+# ============================================
+if [ "$REPO_ADDED" -eq 0 ]; then
+  err "═══════════════════════════════════════════════"
+  err "FATAL: Could not add LiteSpeed repository!"
+  err "Please run manually:"
+  err "  wget -O - https://repo.litespeed.sh | sudo bash"
+  err "  apt-get install openlitespeed lsphp81"
+  err "Then re-run this installer."
+  err "═══════════════════════════════════════════════"
+  exit 1
+fi
+
+# ============================================
+# INSTALL OPENLITESPEED (show log on failure!)
+# ============================================
+log "Installing OpenLiteSpeed (this may take 1-2 minutes)..."
+apt-get install -y openlitespeed > /tmp/ols_install.log 2>&1
+OLS_RC=$?
+
+if [ $OLS_RC -ne 0 ] || [ ! -d "/usr/local/lsws" ]; then
+  err "═══════════════════════════════════════════════"
+  err "FATAL: OpenLiteSpeed installation failed!"
+  err "Exit code: $OLS_RC"
+  err "Last 30 lines of install log:"
+  echo ""
+  tail -30 /tmp/ols_install.log
+  echo ""
+  err "═══════════════════════════════════════════════"
+  exit 1
+fi
+log "OpenLiteSpeed installed"
+
+# ============================================
+# INSTALL PHP 8.1 (split into required/optional)
+# ============================================
+log "Installing PHP 8.1..."
+apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl > /tmp/php_install.log 2>&1
+PHP_RC=$?
+
+# Optional PHP extensions (OK if some fail)
+apt-get install -y -qq lsphp81-mbstring lsphp81-xml lsphp81-zip \
+  lsphp81-intl lsphp81-iconv lsphp81-opcache >> /tmp/php_install.log 2>&1
+
+if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
+  ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
+  log "PHP 8.1 installed ($(php -v 2>/dev/null | head -1 | awk '{print $2}'))"
+else
+  if [ $PHP_RC -ne 0 ]; then
+    err "lsphp81 installation failed. Last 10 lines:"
+    tail -10 /tmp/php_install.log
+  fi
+  warn "lsphp81 binary not found - PHP might not work"
+fi
+
+# ============================================
+# CONFIGURE OLS (only if config exists!)
+# ============================================
 OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
 
+if [ ! -f "$OLS_CONF" ]; then
+  err "OLS config file not found: $OLS_CONF"
+  err "OpenLiteSpeed may have installed incorrectly."
+  exit 1
+fi
+
+log "Configuring OpenLiteSpeed..."
+
+# Set admin password (MD5 format, same method as CyberPanel)
+if [ -d "/usr/local/lsws/admin/conf" ]; then
+  OLS_HASH=$(printf '%s' "${ADMIN_PASS}" | md5sum | awk '{print $1}')
+  echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
+  log "OLS admin password set"
+else
+  warn "OLS admin conf directory not found"
+fi
+
+# Add lsphp81 extprocessor
 if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'EXTEOF'
 
@@ -113,7 +244,7 @@ EXTEOF
   log "lsphp81 extprocessor added"
 fi
 
-# ---- FIX #3: Add HTTP listener on port 80 ----
+# Add HTTP listener on port 80
 if ! grep -q "listener HTTP" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'LSTEOF'
 
@@ -125,20 +256,34 @@ LSTEOF
   log "HTTP listener port 80 added"
 fi
 
-# ---- FIX #7: Update Example vhost to use lsphp81 (for phpMyAdmin) ----
+# Update default lsphp path to lsphp81
+sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
+
+# Update Example vhost to use lsphp81 (for phpMyAdmin)
 EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
 if [ -f "$EXAMPLE_VHCONF" ]; then
-  # Replace any lsphp scripthandler line with lsphp81
   sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
   log "Example vhost updated to lsphp81"
 fi
 
-# ---- FIX #11: Update default lsphp extprocessor path ----
-sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
-
 systemctl enable lsws > /dev/null 2>&1
-systemctl start lsws
-log "OpenLiteSpeed + PHP 8.1 installed & configured"
+systemctl start lsws 2>/dev/null
+sleep 2
+
+if systemctl is-active --quiet lsws 2>/dev/null; then
+  log "OpenLiteSpeed started successfully"
+else
+  warn "OpenLiteSpeed failed to start - checking..."
+  systemctl status lsws --no-pager 2>&1 | tail -5
+  warn "Trying restart..."
+  systemctl restart lsws 2>/dev/null
+  sleep 2
+  if systemctl is-active --quiet lsws 2>/dev/null; then
+    log "OpenLiteSpeed started on retry"
+  else
+    err "OpenLiteSpeed won't start. Check: systemctl status lsws"
+  fi
+fi
 
 ########################################
 step "Step 4/9: Install MariaDB"
@@ -167,9 +312,18 @@ fi
 ########################################
 step "Step 5/9: Install Node.js 18"
 ########################################
-curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
-apt-get install -y -qq nodejs > /dev/null 2>&1
-log "Node.js $(node -v 2>/dev/null || echo 'unknown') installed"
+if ! command -v node > /dev/null 2>&1; then
+  curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
+  apt-get install -y -qq nodejs > /dev/null 2>&1
+fi
+
+if command -v node > /dev/null 2>&1; then
+  log "Node.js $(node -v 2>/dev/null) installed"
+else
+  err "Node.js installation failed!"
+  err "Manual install: curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt install nodejs"
+  exit 1
+fi
 
 ########################################
 step "Step 6/9: Creating LitePanel App"
@@ -193,11 +347,22 @@ cat > package.json <<'PKGEOF'
 }
 PKGEOF
 
-npm install --production > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-  warn "npm install retry with legacy-peer-deps..."
-  npm install --production --legacy-peer-deps > /dev/null 2>&1
+log "Installing npm dependencies..."
+npm install --production > /tmp/npm_install.log 2>&1
+NPM_RC=$?
+
+if [ $NPM_RC -ne 0 ]; then
+  warn "npm install failed (code $NPM_RC), retrying with legacy-peer-deps..."
+  npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
+  NPM_RC=$?
 fi
+
+if [ $NPM_RC -ne 0 ]; then
+  err "npm install failed. Check /tmp/npm_install.log"
+  tail -10 /tmp/npm_install.log
+  exit 1
+fi
+log "npm dependencies installed"
 
 # --- config.json ---
 HASHED_PASS=$(node -e "console.log(require('bcryptjs').hashSync('${ADMIN_PASS}', 10))" 2>/dev/null)
@@ -214,7 +379,7 @@ cat > config.json <<CFGEOF
 CFGEOF
 
 ##############################################
-# -------- app.js (Backend - FIXED) --------
+# -------- app.js (Backend) --------
 ##############################################
 cat > app.js <<'APPEOF'
 const express = require('express');
@@ -226,7 +391,6 @@ const path = require('path');
 const os = require('os');
 const multer = require('multer');
 
-/* ---- Config ---- */
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 let config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 
@@ -244,43 +408,33 @@ app.use(session({
 }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-const auth = (req, res, next) => {
+var auth = function(req, res, next) {
   if (req.session && req.session.user) return next();
   res.status(401).json({ error: 'Unauthorized' });
 };
 
-/* ---- Helpers ---- */
 function run(cmd, timeout) {
-  try {
-    return execSync(cmd, { timeout: timeout || 15000, maxBuffer: 5*1024*1024 }).toString().trim();
-  } catch(e) { return e.stderr ? e.stderr.toString().trim() : e.message; }
+  try { return execSync(cmd, { timeout: timeout || 15000, maxBuffer: 5*1024*1024 }).toString().trim(); }
+  catch(e) { return e.stderr ? e.stderr.toString().trim() : e.message; }
 }
-
 function svcActive(name) {
   try { execSync('systemctl is-active ' + name, { stdio: 'pipe' }); return true; }
   catch(e) { return false; }
 }
-
 function escRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function shellEsc(s) { return s.replace(/'/g, "'\\''"); }
 
-/* ==================================================
-   FIX #4,5,6,10: OLS Config Management
-   Proper vhost format + line-safe regex + backup
-   ================================================== */
-
+/* === OLS Config Management === */
 function readOLSConf() { return fs.readFileSync(OLS_CONF, 'utf8'); }
-
 function writeOLSConf(content) {
   fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
   fs.writeFileSync(OLS_CONF, content);
 }
 
 function addDomainToOLS(domain) {
-  let httpd = readOLSConf();
+  var httpd = readOLSConf();
   if (httpd.includes('virtualhost ' + domain + ' {')) return;
 
-  // Append virtualhost block
   httpd += '\nvirtualhost ' + domain + ' {\n'
     + '  vhRoot                  ' + OLS_VHOST_DIR + '/' + domain + '\n'
     + '  configFile              ' + OLS_VHOST_CONF_DIR + '/' + domain + '/vhconf.conf\n'
@@ -289,34 +443,24 @@ function addDomainToOLS(domain) {
     + '  restrained              1\n'
     + '}\n';
 
-  // Add map to HTTP listener (port 80)
-  // FIX #6: target HTTP listener, not Default (8088)
   var listenerRe = /(listener\s+HTTP\s*\{[\s\S]*?)(})/;
   if (listenerRe.test(httpd)) {
     httpd = httpd.replace(listenerRe,
       '$1  map                     ' + domain + ' ' + domain + ', www.' + domain + '\n$2');
   } else {
-    // Fallback: create HTTP listener with map
     httpd += '\nlistener HTTP {\n  address                 *:80\n  secure                  0\n'
       + '  map                     ' + domain + ' ' + domain + ', www.' + domain + '\n}\n';
   }
-
   writeOLSConf(httpd);
 }
 
 function removeDomainFromOLS(domain) {
-  let httpd = readOLSConf();
+  var httpd = readOLSConf();
   fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
-
-  // FIX #5: Use [\s\S]*? for multiline match (not [^}] which fails on newlines)
   var vhRe = new RegExp('\\n?virtualhost\\s+' + escRegex(domain) + '\\s*\\{[\\s\\S]*?\\}', 'g');
   httpd = httpd.replace(vhRe, '');
-
-  // Remove map entries for this domain
   var mapRe = new RegExp('^\\s*map\\s+' + escRegex(domain) + '\\s+.*$', 'gm');
   httpd = httpd.replace(mapRe, '');
-
-  // Clean up excess blank lines
   httpd = httpd.replace(/\n{3,}/g, '\n\n');
   fs.writeFileSync(OLS_CONF, httpd);
 }
@@ -325,12 +469,10 @@ function createVhostFiles(domain) {
   var confDir = path.join(OLS_VHOST_CONF_DIR, domain);
   var docRoot = path.join(OLS_VHOST_DIR, domain, 'html');
   var logDir  = path.join(OLS_VHOST_DIR, domain, 'logs');
-
   fs.mkdirSync(confDir, { recursive: true });
   fs.mkdirSync(docRoot, { recursive: true });
   fs.mkdirSync(logDir,  { recursive: true });
 
-  // FIX #4: Proper OLS vhconf.conf format (studied from CyberPanel)
   var vhConf = 'docRoot                   $VH_ROOT/html\n'
     + 'vhDomain                  ' + domain + '\n'
     + 'vhAliases                 www.' + domain + '\n'
@@ -356,20 +498,16 @@ function createVhostFiles(domain) {
     '<!DOCTYPE html>\n<html><head><title>' + domain + '</title></head>\n'
     + '<body><h1>Welcome to ' + domain + '</h1>\n'
     + '<p>Hosted on LitePanel with OpenLiteSpeed</p></body></html>\n');
-
   try { execSync('chown -R nobody:nogroup ' + path.join(OLS_VHOST_DIR, domain)); } catch(e) {}
   return docRoot;
 }
 
-// FIX #10: Safe restart with config validation & rollback
 function safeRestartOLS() {
   try {
     execSync('systemctl restart lsws', { timeout: 15000 });
     execSync('sleep 2', { timeout: 5000 });
-    try {
-      execSync('systemctl is-active lsws', { stdio: 'pipe' });
-    } catch(e) {
-      // OLS failed → restore backup
+    try { execSync('systemctl is-active lsws', { stdio: 'pipe' }); }
+    catch(e) {
       if (fs.existsSync(OLS_CONF + '.bak')) {
         fs.copyFileSync(OLS_CONF + '.bak', OLS_CONF);
         execSync('systemctl restart lsws', { timeout: 15000 });
@@ -379,18 +517,17 @@ function safeRestartOLS() {
   } catch(e) { throw e; }
 }
 
-/* ---- Auth Routes ---- */
+/* === Auth === */
 app.post('/api/login', function(req, res) {
   var u = req.body.username, p = req.body.password;
   if (u === config.adminUser && bcrypt.compareSync(p, config.adminPass)) {
-    req.session.user = u;
-    res.json({ success: true });
-  } else { res.status(401).json({ error: 'Invalid credentials' }); }
+    req.session.user = u; res.json({ success: true });
+  } else res.status(401).json({ error: 'Invalid credentials' });
 });
 app.get('/api/logout', function(req, res) { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/auth', function(req, res) { res.json({ authenticated: !!(req.session && req.session.user) }); });
 
-/* ---- Dashboard ---- */
+/* === Dashboard === */
 app.get('/api/dashboard', auth, function(req, res) {
   var tm = os.totalmem(), fm = os.freemem();
   var disk = { total: 0, used: 0, free: 0 };
@@ -400,26 +537,23 @@ app.get('/api/dashboard', auth, function(req, res) {
     hostname: os.hostname(), ip: run("hostname -I | awk '{print $1}'"),
     uptime: os.uptime(),
     cpu: { model: cpus[0] ? cpus[0].model : 'Unknown', cores: cpus.length, load: os.loadavg() },
-    memory: { total: tm, used: tm - fm, free: fm },
-    disk: disk, nodeVersion: process.version
+    memory: { total: tm, used: tm - fm, free: fm }, disk: disk, nodeVersion: process.version
   });
 });
 
-/* ---- Services ---- */
+/* === Services === */
 app.get('/api/services', auth, function(req, res) {
-  var svcs = ['lsws','mariadb','fail2ban','cloudflared'];
-  res.json(svcs.map(function(s) { return { name: s, active: svcActive(s) }; }));
+  res.json(['lsws','mariadb','fail2ban','cloudflared'].map(function(s) { return { name: s, active: svcActive(s) }; }));
 });
 app.post('/api/services/:name/:action', auth, function(req, res) {
-  var ok = ['lsws','mariadb','fail2ban','cloudflared'];
-  var acts = ['start','stop','restart'];
+  var ok = ['lsws','mariadb','fail2ban','cloudflared'], acts = ['start','stop','restart'];
   if (!ok.includes(req.params.name) || !acts.includes(req.params.action))
     return res.status(400).json({ error: 'Invalid' });
   try { execSync('systemctl ' + req.params.action + ' ' + req.params.name, { timeout: 15000 }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ---- File Manager (FIX #8,12,13) ---- */
+/* === File Manager === */
 app.get('/api/files', auth, function(req, res) {
   var p = path.resolve(req.query.path || '/');
   try {
@@ -435,77 +569,58 @@ app.get('/api/files', auth, function(req, res) {
       });
       res.json({ path: p, items: items });
     } else {
-      // FIX #12: Check file size and binary before reading
       if (stat.size > MAX_EDIT_SIZE) return res.json({ path: p, size: stat.size, tooLarge: true });
       var buf = Buffer.alloc(Math.min(512, stat.size));
-      var fd = fs.openSync(p, 'r');
-      fs.readSync(fd, buf, 0, buf.length, 0);
-      fs.closeSync(fd);
+      if (stat.size > 0) { var fd = fs.openSync(p, 'r'); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd); }
       if (buf.includes(0)) return res.json({ path: p, size: stat.size, binary: true });
       res.json({ path: p, content: fs.readFileSync(p, 'utf8'), size: stat.size });
     }
   } catch(e) { res.status(404).json({ error: e.message }); }
 });
-
 app.put('/api/files', auth, function(req, res) {
   try { fs.writeFileSync(req.body.filePath, req.body.content); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/files', auth, function(req, res) {
   var target = req.query.path;
   if (!target || target === '/') return res.status(400).json({ error: 'Cannot delete root' });
   try { fs.rmSync(target, { recursive: true, force: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 var upload = multer({ dest: '/tmp/uploads/' });
 app.post('/api/files/upload', auth, upload.single('file'), function(req, res) {
-  try {
-    var destDir = req.body.path || '/tmp';
-    fs.renameSync(req.file.path, path.join(destDir, req.file.originalname));
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  try { fs.renameSync(req.file.path, path.join(req.body.path || '/tmp', req.file.originalname)); res.json({ success: true }); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/files/mkdir', auth, function(req, res) {
   try { fs.mkdirSync(req.body.path, { recursive: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-// FIX #13: Add rename & download
 app.post('/api/files/rename', auth, function(req, res) {
   try { fs.renameSync(req.body.oldPath, req.body.newPath); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.get('/api/files/download', auth, function(req, res) {
   var fp = req.query.path;
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
-  try {
-    if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' });
-    res.download(fp);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  try { if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); res.download(fp); }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ---- Domains (FIX #4,5,6,10) ---- */
+/* === Domains === */
 app.get('/api/domains', auth, function(req, res) {
   try {
     if (!fs.existsSync(OLS_VHOST_CONF_DIR)) return res.json([]);
     var list = fs.readdirSync(OLS_VHOST_CONF_DIR).filter(function(n) {
       return fs.statSync(path.join(OLS_VHOST_CONF_DIR, n)).isDirectory() && n !== 'Example';
     });
-    res.json(list.map(function(name) {
-      return { name: name, docRoot: path.join(OLS_VHOST_DIR, name, 'html') };
-    }));
+    res.json(list.map(function(name) { return { name: name, docRoot: path.join(OLS_VHOST_DIR, name, 'html') }; }));
   } catch(e) { res.json([]); }
 });
-
 app.post('/api/domains', auth, function(req, res) {
   var domain = req.body.domain;
   if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain))
     return res.status(400).json({ error: 'Invalid domain name' });
-  if (domain === 'Example') return res.status(400).json({ error: 'Reserved name' });
   try {
     var docRoot = createVhostFiles(domain);
     addDomainToOLS(domain);
@@ -513,7 +628,6 @@ app.post('/api/domains', auth, function(req, res) {
     res.json({ success: true, domain: domain, docRoot: docRoot });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/domains/:name', auth, function(req, res) {
   var domain = req.params.name;
   if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain))
@@ -526,7 +640,7 @@ app.delete('/api/domains/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ---- Databases (FIX #9) ---- */
+/* === Databases === */
 app.get('/api/databases', auth, function(req, res) {
   try {
     var out = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
@@ -534,11 +648,9 @@ app.get('/api/databases', auth, function(req, res) {
     res.json(out.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); }));
   } catch(e) { res.json([]); }
 });
-
 app.post('/api/databases', auth, function(req, res) {
   var name = req.body.name, user = req.body.user, password = req.body.password;
-  // FIX #9: strict validation to prevent SQL injection
-  if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name (a-z, 0-9, _ only)' });
+  if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name' });
   if (user && !/^[a-zA-Z0-9_]+$/.test(user)) return res.status(400).json({ error: 'Invalid username' });
   try {
     var dp = shellEsc(config.dbRootPass);
@@ -550,7 +662,6 @@ app.post('/api/databases', auth, function(req, res) {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
 app.delete('/api/databases/:name', auth, function(req, res) {
   if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
   try {
@@ -559,18 +670,13 @@ app.delete('/api/databases/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ---- Tunnel ---- */
-app.get('/api/tunnel/status', auth, function(req, res) {
-  res.json({ active: svcActive('cloudflared') });
-});
+/* === Tunnel === */
+app.get('/api/tunnel/status', auth, function(req, res) { res.json({ active: svcActive('cloudflared') }); });
 app.post('/api/tunnel/setup', auth, function(req, res) {
   var token = req.body.token;
   if (!token) return res.status(400).json({ error: 'Token required' });
   var safeToken = token.replace(/[;&|`$(){}]/g, '');
   try {
-    if (!fs.existsSync('/usr/bin/cloudflared')) {
-      run('wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -O /tmp/cf.deb && dpkg -i /tmp/cf.deb && rm -f /tmp/cf.deb', 30000);
-    }
     fs.writeFileSync('/etc/systemd/system/cloudflared.service',
       '[Unit]\nDescription=Cloudflare Tunnel\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/cloudflared tunnel run --token ' + safeToken + '\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n');
     execSync('systemctl daemon-reload && systemctl enable cloudflared && systemctl restart cloudflared', { timeout: 15000 });
@@ -578,7 +684,7 @@ app.post('/api/tunnel/setup', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* ---- Settings ---- */
+/* === Settings === */
 app.post('/api/settings/password', auth, function(req, res) {
   if (!bcrypt.compareSync(req.body.currentPassword, config.adminPass))
     return res.status(401).json({ error: 'Wrong current password' });
@@ -589,7 +695,7 @@ app.post('/api/settings/password', auth, function(req, res) {
   res.json({ success: true });
 });
 
-/* ---- Terminal ---- */
+/* === Terminal === */
 app.post('/api/terminal', auth, function(req, res) {
   if (!req.body.command) return res.json({ output: '' });
   try { res.json({ output: run(req.body.command, 30000) }); }
@@ -649,7 +755,7 @@ cat > public/index.html <<'HTMLEOF'
 HTMLEOF
 
 ##############################################
-# -------- public/css/style.css (FIX #14) ---
+# -------- public/css/style.css --------
 ##############################################
 cat > public/css/style.css <<'CSSEOF'
 *{margin:0;padding:0;box-sizing:border-box}
@@ -727,10 +833,9 @@ textarea.form-control{min-height:300px;font-family:'Courier New',monospace;font-
 CSSEOF
 
 ##############################################
-# ---- public/js/app.js (Frontend FIXED) ----
+# -------- public/js/app.js (Frontend) ------
 ##############################################
 cat > public/js/app.js <<'JSEOF'
-/* ---- API Helper ---- */
 var api = {
   req: function(url, opt) {
     opt = opt || {};
@@ -748,48 +853,31 @@ var api = {
 };
 
 var $ = function(id) { return document.getElementById(id); };
-function fmtB(b) {
-  if (!b) return '0 B';
-  var k = 1024, s = ['B','KB','MB','GB','TB'], i = Math.floor(Math.log(b) / Math.log(k));
-  return (b / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
-}
-function fmtUp(s) {
-  var d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
-  return d + 'd ' + h + 'h ' + m + 'm';
-}
-function esc(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
-function pClass(p) { return p > 80 ? 'danger' : p > 60 ? 'warn' : ''; }
+function fmtB(b) { if(!b)return '0 B'; var k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k)); return (b/Math.pow(k,i)).toFixed(1)+' '+s[i]; }
+function fmtUp(s) { var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60); return d+'d '+h+'h '+m+'m'; }
+function esc(t) { var d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
+function pClass(p) { return p>80?'danger':p>60?'warn':''; }
 
-/* ---- State ---- */
 var curPath = '/usr/local/lsws';
 var editFile = '';
 
-/* ---- Auth ---- */
 function checkAuth() {
   api.get('/api/auth').then(function(r) {
-    if (r.authenticated) { showPanel(); loadPage('dashboard'); }
-    else showLogin();
+    if (r.authenticated) { showPanel(); loadPage('dashboard'); } else showLogin();
   });
 }
-function showLogin() { $('loginPage').style.display = 'flex'; $('mainPanel').style.display = 'none'; }
-function showPanel() { $('loginPage').style.display = 'none'; $('mainPanel').style.display = 'flex'; }
+function showLogin() { $('loginPage').style.display='flex'; $('mainPanel').style.display='none'; }
+function showPanel() { $('loginPage').style.display='none'; $('mainPanel').style.display='flex'; }
 
 $('loginForm').addEventListener('submit', function(e) {
   e.preventDefault();
-  api.post('/api/login', { username: $('username').value, password: $('password').value })
-    .then(function(r) {
-      if (r.success) { showPanel(); loadPage('dashboard'); }
-      else $('loginError').textContent = 'Invalid credentials';
-    });
+  api.post('/api/login', { username: $('username').value, password: $('password').value }).then(function(r) {
+    if (r.success) { showPanel(); loadPage('dashboard'); } else $('loginError').textContent='Invalid credentials';
+  });
 });
 $('logoutBtn').addEventListener('click', function(e) { e.preventDefault(); api.get('/api/logout').then(showLogin); });
+$('mobileToggle').addEventListener('click', function() { $('sidebar').classList.toggle('open'); });
 
-/* ---- Mobile Toggle (FIX #14) ---- */
-$('mobileToggle').addEventListener('click', function() {
-  $('sidebar').classList.toggle('open');
-});
-
-/* ---- Navigation ---- */
 document.querySelectorAll('.sidebar nav a').forEach(function(a) {
   a.addEventListener('click', function(e) {
     e.preventDefault();
@@ -814,309 +902,205 @@ function loadPage(p) {
   }
 }
 
-/* ======== Dashboard ======== */
 function pgDash(el) {
   Promise.all([api.get('/api/dashboard'), api.get('/api/services')]).then(function(res) {
     var d = res[0], s = res[1];
-    var mp = Math.round(d.memory.used / d.memory.total * 100);
-    var dp = d.disk.total ? Math.round(d.disk.used / d.disk.total * 100) : 0;
-    el.innerHTML = '<h2 class="page-title">📊 Dashboard</h2><p class="page-sub">' + d.hostname + ' (' + d.ip + ')</p>'
-      + '<div class="stats-grid">'
-      + '<div class="card"><div class="label">CPU</div><div class="value">' + d.cpu.cores + ' Cores</div><div class="sub">Load: ' + d.cpu.load.map(function(l){ return l.toFixed(2); }).join(', ') + '</div></div>'
-      + '<div class="card"><div class="label">Memory</div><div class="value">' + mp + '%</div><div class="progress"><div class="progress-bar ' + pClass(mp) + '" style="width:' + mp + '%"></div></div><div class="sub">' + fmtB(d.memory.used) + ' / ' + fmtB(d.memory.total) + '</div></div>'
-      + '<div class="card"><div class="label">Disk</div><div class="value">' + dp + '%</div><div class="progress"><div class="progress-bar ' + pClass(dp) + '" style="width:' + dp + '%"></div></div><div class="sub">' + fmtB(d.disk.used) + ' / ' + fmtB(d.disk.total) + '</div></div>'
-      + '<div class="card"><div class="label">Uptime</div><div class="value">' + fmtUp(d.uptime) + '</div><div class="sub">Node ' + d.nodeVersion + '</div></div>'
-      + '</div>'
-      + '<h3 class="mb">Services</h3>'
-      + '<table class="tbl"><thead><tr><th>Service</th><th>Status</th></tr></thead><tbody>'
-      + s.map(function(x) { return '<tr><td>' + x.name + '</td><td><span class="badge ' + (x.active ? 'badge-on' : 'badge-off') + '">' + (x.active ? 'Running' : 'Stopped') + '</span></td></tr>'; }).join('')
-      + '</tbody></table>'
-      + '<div class="mt"><a href="http://' + d.ip + ':7080" target="_blank" class="btn btn-p">OLS Admin</a> <a href="http://' + d.ip + ':8088/phpmyadmin/" target="_blank" class="btn btn-w">phpMyAdmin</a></div>';
+    var mp = Math.round(d.memory.used/d.memory.total*100);
+    var dp = d.disk.total ? Math.round(d.disk.used/d.disk.total*100) : 0;
+    el.innerHTML = '<h2 class="page-title">📊 Dashboard</h2><p class="page-sub">'+d.hostname+' ('+d.ip+')</p>'
+      +'<div class="stats-grid">'
+      +'<div class="card"><div class="label">CPU</div><div class="value">'+d.cpu.cores+' Cores</div><div class="sub">Load: '+d.cpu.load.map(function(l){return l.toFixed(2)}).join(', ')+'</div></div>'
+      +'<div class="card"><div class="label">Memory</div><div class="value">'+mp+'%</div><div class="progress"><div class="progress-bar '+pClass(mp)+'" style="width:'+mp+'%"></div></div><div class="sub">'+fmtB(d.memory.used)+' / '+fmtB(d.memory.total)+'</div></div>'
+      +'<div class="card"><div class="label">Disk</div><div class="value">'+dp+'%</div><div class="progress"><div class="progress-bar '+pClass(dp)+'" style="width:'+dp+'%"></div></div><div class="sub">'+fmtB(d.disk.used)+' / '+fmtB(d.disk.total)+'</div></div>'
+      +'<div class="card"><div class="label">Uptime</div><div class="value">'+fmtUp(d.uptime)+'</div><div class="sub">Node '+d.nodeVersion+'</div></div>'
+      +'</div><h3 class="mb">Services</h3><table class="tbl"><thead><tr><th>Service</th><th>Status</th></tr></thead><tbody>'
+      +s.map(function(x){return '<tr><td>'+x.name+'</td><td><span class="badge '+(x.active?'badge-on':'badge-off')+'">'+(x.active?'Running':'Stopped')+'</span></td></tr>';}).join('')
+      +'</tbody></table>'
+      +'<div class="mt"><a href="http://'+d.ip+':7080" target="_blank" class="btn btn-p">OLS Admin</a> <a href="http://'+d.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w">phpMyAdmin</a></div>';
   });
 }
 
-/* ======== Services ======== */
 function pgSvc(el) {
   api.get('/api/services').then(function(s) {
     el.innerHTML = '<h2 class="page-title">⚙️ Services</h2><p class="page-sub">Manage services</p><div id="svcMsg"></div>'
-      + '<table class="tbl"><thead><tr><th>Service</th><th>Status</th><th>Actions</th></tr></thead><tbody>'
-      + s.map(function(x) {
-        return '<tr><td><strong>' + x.name + '</strong></td>'
-          + '<td><span class="badge ' + (x.active ? 'badge-on' : 'badge-off') + '">' + (x.active ? 'Running' : 'Stopped') + '</span></td>'
-          + '<td><button class="btn btn-s btn-sm" data-svc="' + x.name + '" data-act="start" onclick="svcAct(this)">Start</button> '
-          + '<button class="btn btn-d btn-sm" data-svc="' + x.name + '" data-act="stop" onclick="svcAct(this)">Stop</button> '
-          + '<button class="btn btn-w btn-sm" data-svc="' + x.name + '" data-act="restart" onclick="svcAct(this)">Restart</button></td></tr>';
-      }).join('')
-      + '</tbody></table>';
+      +'<table class="tbl"><thead><tr><th>Service</th><th>Status</th><th>Actions</th></tr></thead><tbody>'
+      +s.map(function(x){
+        return '<tr><td><strong>'+x.name+'</strong></td>'
+          +'<td><span class="badge '+(x.active?'badge-on':'badge-off')+'">'+(x.active?'Running':'Stopped')+'</span></td>'
+          +'<td><button class="btn btn-s btn-sm" data-svc="'+x.name+'" data-act="start" onclick="svcAct(this)">Start</button> '
+          +'<button class="btn btn-d btn-sm" data-svc="'+x.name+'" data-act="stop" onclick="svcAct(this)">Stop</button> '
+          +'<button class="btn btn-w btn-sm" data-svc="'+x.name+'" data-act="restart" onclick="svcAct(this)">Restart</button></td></tr>';
+      }).join('')+'</tbody></table>';
   });
 }
 window.svcAct = function(btn) {
-  var n = btn.dataset.svc, a = btn.dataset.act;
-  api.post('/api/services/' + n + '/' + a).then(function(r) {
-    $('svcMsg').innerHTML = r.success
-      ? '<div class="alert alert-ok">' + n + ' ' + a + 'ed</div>'
-      : '<div class="alert alert-err">' + (r.error || 'Failed') + '</div>';
-    setTimeout(function() { loadPage('services'); }, 1200);
+  var n=btn.dataset.svc, a=btn.dataset.act;
+  api.post('/api/services/'+n+'/'+a).then(function(r) {
+    $('svcMsg').innerHTML = r.success?'<div class="alert alert-ok">'+n+' '+a+'ed</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    setTimeout(function(){loadPage('services')},1200);
   });
 };
 
-/* ======== File Manager (FIX #8: data attributes, no inline path strings) ======== */
 function pgFiles(el, p) {
   if (p !== undefined) curPath = p;
-  api.get('/api/files?path=' + encodeURIComponent(curPath)).then(function(d) {
-    if (d.error) { el.innerHTML = '<div class="alert alert-err">' + esc(d.error) + '</div>'; return; }
-
-    // Binary file
+  api.get('/api/files?path='+encodeURIComponent(curPath)).then(function(d) {
+    if (d.error) { el.innerHTML='<div class="alert alert-err">'+esc(d.error)+'</div>'; return; }
     if (d.binary) {
-      el.innerHTML = '<h2 class="page-title">📄 Binary File</h2><p class="page-sub">' + esc(d.path) + '</p>'
-        + '<div class="card"><p>Binary file (' + fmtB(d.size) + ') — cannot edit</p>'
-        + '<div class="mt"><a href="/api/files/download?path=' + encodeURIComponent(d.path) + '" class="btn btn-p" target="_blank">Download</a> '
-        + '<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
-      curPath = d.path.substring(0, d.path.lastIndexOf('/')) || '/';
+      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
+      el.innerHTML='<h2 class="page-title">📄 Binary File</h2><p class="page-sub">'+esc(d.path)+'</p>'
+        +'<div class="card"><p>Binary file ('+fmtB(d.size)+') — cannot edit</p>'
+        +'<div class="mt"><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p" target="_blank">Download</a> '
+        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
       return;
     }
-
-    // Too large
     if (d.tooLarge) {
-      el.innerHTML = '<h2 class="page-title">📄 Large File</h2><p class="page-sub">' + esc(d.path) + '</p>'
-        + '<div class="card"><p>File too large to edit (' + fmtB(d.size) + ')</p>'
-        + '<div class="mt"><a href="/api/files/download?path=' + encodeURIComponent(d.path) + '" class="btn btn-p" target="_blank">Download</a> '
-        + '<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
-      curPath = d.path.substring(0, d.path.lastIndexOf('/')) || '/';
+      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
+      el.innerHTML='<h2 class="page-title">📄 Large File</h2><p class="page-sub">'+esc(d.path)+'</p>'
+        +'<div class="card"><p>File too large to edit ('+fmtB(d.size)+')</p>'
+        +'<div class="mt"><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p" target="_blank">Download</a> '
+        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
       return;
     }
-
-    // Text file editor
     if (d.content !== undefined) {
       editFile = d.path;
-      curPath = d.path.substring(0, d.path.lastIndexOf('/')) || '/';
-      el.innerHTML = '<h2 class="page-title">📝 Edit File</h2><p class="page-sub">' + esc(d.path) + ' (' + fmtB(d.size) + ')</p><div id="fMsg"></div>'
-        + '<textarea class="form-control" id="fContent">' + esc(d.content) + '</textarea>'
-        + '<div class="mt"><button class="btn btn-p" onclick="saveFile()">💾 Save</button> '
-        + '<a href="/api/files/download?path=' + encodeURIComponent(d.path) + '" class="btn btn-w" target="_blank">Download</a> '
-        + '<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div>';
+      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
+      el.innerHTML='<h2 class="page-title">📝 Edit</h2><p class="page-sub">'+esc(d.path)+' ('+fmtB(d.size)+')</p><div id="fMsg"></div>'
+        +'<textarea class="form-control" id="fContent">'+esc(d.content)+'</textarea>'
+        +'<div class="mt"><button class="btn btn-p" onclick="saveFile()">💾 Save</button> '
+        +'<a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-w" target="_blank">Download</a> '
+        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div>';
       return;
     }
-
-    // Directory listing
-    var parts = curPath.split('/').filter(Boolean);
-    var bc = '<a data-nav="/" onclick="navF(this)">root</a>';
-    var bp = '';
-    parts.forEach(function(x) {
-      bp += '/' + x;
-      bc += ' <span>/</span> <a data-nav="' + encodeURIComponent(bp) + '" onclick="navF(this)">' + esc(x) + '</a>';
+    var parts=curPath.split('/').filter(Boolean);
+    var bc='<a data-nav="/" onclick="navF(this)">root</a>', bp='';
+    parts.forEach(function(x){ bp+='/'+x; bc+=' <span>/</span> <a data-nav="'+encodeURIComponent(bp)+'" onclick="navF(this)">'+esc(x)+'</a>'; });
+    var items=(d.items||[]).sort(function(a,b){ return a.isDir===b.isDir?a.name.localeCompare(b.name):(a.isDir?-1:1); });
+    var parent=curPath==='/'?'':(curPath.split('/').slice(0,-1).join('/')||'/');
+    var html='<h2 class="page-title">📁 File Manager</h2><div class="breadcrumb">'+bc+'</div><div id="fMsg"></div>'
+      +'<div class="mb"><button class="btn btn-p" onclick="uploadF()">📤 Upload</button> <button class="btn btn-s" onclick="mkdirF()">📁 New Folder</button></div><div>';
+    if (parent) html+='<div class="file-item" data-nav="'+encodeURIComponent(parent)+'" ondblclick="navF(this)"><span class="icon">📁</span><span class="name">..</span><span class="size"></span></div>';
+    items.forEach(function(i){
+      var fp=(curPath==='/'?'':curPath)+'/'+i.name, enc=encodeURIComponent(fp);
+      html+='<div class="file-item" data-nav="'+enc+'" ondblclick="navF(this)">'
+        +'<span class="icon">'+(i.isDir?'📁':'📄')+'</span><span class="name">'+esc(i.name)+'</span>'
+        +(i.perms?'<span class="perms">'+i.perms+'</span>':'')
+        +'<span class="size">'+(i.isDir?'':fmtB(i.size))+'</span>'
+        +'<div class="file-actions">'
+        +(!i.isDir?'<a href="/api/files/download?path='+enc+'" class="btn btn-p btn-sm" target="_blank" onclick="event.stopPropagation()">⬇</a> ':'')
+        +'<button class="btn btn-w btn-sm" data-rn="'+enc+'" onclick="event.stopPropagation();renF(this)">✏️</button> '
+        +'<button class="btn btn-d btn-sm" data-del="'+enc+'" onclick="event.stopPropagation();delF(this)">🗑</button>'
+        +'</div></div>';
     });
-
-    var items = (d.items || []).sort(function(a, b) {
-      return a.isDir === b.isDir ? a.name.localeCompare(b.name) : (a.isDir ? -1 : 1);
-    });
-    var parent = curPath === '/' ? '' : (curPath.split('/').slice(0, -1).join('/') || '/');
-
-    var html = '<h2 class="page-title">📁 File Manager</h2>'
-      + '<div class="breadcrumb">' + bc + '</div><div id="fMsg"></div>'
-      + '<div class="mb">'
-      + '<button class="btn btn-p" onclick="uploadF()">📤 Upload</button> '
-      + '<button class="btn btn-s" onclick="mkdirF()">📁 New Folder</button>'
-      + '</div><div>';
-
-    if (parent) {
-      html += '<div class="file-item" data-nav="' + encodeURIComponent(parent) + '" ondblclick="navF(this)">'
-        + '<span class="icon">📁</span><span class="name">..</span><span class="size"></span></div>';
-    }
-
-    // FIX #8: Use data attributes for paths, no inline string concatenation
-    items.forEach(function(i) {
-      var fullPath = (curPath === '/' ? '' : curPath) + '/' + i.name;
-      var enc = encodeURIComponent(fullPath);
-      html += '<div class="file-item" data-nav="' + enc + '" ondblclick="navF(this)">'
-        + '<span class="icon">' + (i.isDir ? '📁' : '📄') + '</span>'
-        + '<span class="name">' + esc(i.name) + '</span>'
-        + (i.perms ? '<span class="perms">' + i.perms + '</span>' : '')
-        + '<span class="size">' + (i.isDir ? '' : fmtB(i.size)) + '</span>'
-        + '<div class="file-actions">'
-        + (!i.isDir ? '<a href="/api/files/download?path=' + enc + '" class="btn btn-p btn-sm" target="_blank" onclick="event.stopPropagation()">⬇</a> ' : '')
-        + '<button class="btn btn-w btn-sm" data-rn="' + enc + '" onclick="event.stopPropagation();renF(this)">✏️</button> '
-        + '<button class="btn btn-d btn-sm" data-del="' + enc + '" onclick="event.stopPropagation();delF(this)">🗑</button>'
-        + '</div></div>';
-    });
-
-    html += '</div>';
-    el.innerHTML = html;
+    el.innerHTML=html+'</div>';
   });
 }
-
-// FIX #8: Safe navigation using data attributes
-window.navF = function(el) {
-  var p = el.dataset ? el.dataset.nav : el.getAttribute('data-nav');
-  if (p) pgFiles($('content'), decodeURIComponent(p));
-};
-
+window.navF = function(el) { var p=el.dataset?el.dataset.nav:el.getAttribute('data-nav'); if(p)pgFiles($('content'),decodeURIComponent(p)); };
 window.saveFile = function() {
-  api.put('/api/files', { filePath: editFile, content: $('fContent').value }).then(function(r) {
-    $('fMsg').innerHTML = r.success ? '<div class="alert alert-ok">Saved!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+  api.put('/api/files',{filePath:editFile,content:$('fContent').value}).then(function(r){
+    $('fMsg').innerHTML=r.success?'<div class="alert alert-ok">Saved!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
   });
 };
-
-window.delF = function(btn) {
-  var p = decodeURIComponent(btn.dataset.del);
-  if (confirm('Delete ' + p + '?')) {
-    api.del('/api/files?path=' + encodeURIComponent(p)).then(function() { pgFiles($('content')); });
-  }
-};
-
+window.delF = function(btn) { var p=decodeURIComponent(btn.dataset.del); if(confirm('Delete '+p+'?'))api.del('/api/files?path='+encodeURIComponent(p)).then(function(){pgFiles($('content'))}); };
 window.renF = function(btn) {
-  var oldPath = decodeURIComponent(btn.dataset.rn);
-  var oldName = oldPath.split('/').pop();
-  var newName = prompt('Rename to:', oldName);
-  if (newName && newName !== oldName) {
-    var dir = oldPath.substring(0, oldPath.lastIndexOf('/'));
-    api.post('/api/files/rename', { oldPath: oldPath, newPath: dir + '/' + newName }).then(function(r) {
-      if (r.success) pgFiles($('content'));
-      else alert('Rename failed: ' + (r.error || ''));
-    });
-  }
+  var old=decodeURIComponent(btn.dataset.rn), nm=old.split('/').pop(), nn=prompt('Rename to:',nm);
+  if(nn&&nn!==nm){ var dir=old.substring(0,old.lastIndexOf('/')); api.post('/api/files/rename',{oldPath:old,newPath:dir+'/'+nn}).then(function(r){if(r.success)pgFiles($('content'));else alert('Error: '+(r.error||''));}); }
 };
-
 window.uploadF = function() {
-  var inp = document.createElement('input'); inp.type = 'file';
-  inp.onchange = function() {
-    var fd = new FormData();
-    fd.append('file', inp.files[0]);
-    fd.append('path', curPath);
-    api.req('/api/files/upload', { method: 'POST', body: fd }).then(function() { pgFiles($('content')); });
-  };
+  var inp=document.createElement('input'); inp.type='file';
+  inp.onchange=function(){ var fd=new FormData(); fd.append('file',inp.files[0]); fd.append('path',curPath); api.req('/api/files/upload',{method:'POST',body:fd}).then(function(){pgFiles($('content'))}); };
   inp.click();
 };
+window.mkdirF = function() { var n=prompt('Folder name:'); if(n)api.post('/api/files/mkdir',{path:curPath+'/'+n}).then(function(){pgFiles($('content'))}); };
 
-window.mkdirF = function() {
-  var n = prompt('Folder name:');
-  if (n) api.post('/api/files/mkdir', { path: curPath + '/' + n }).then(function() { pgFiles($('content')); });
-};
-
-/* ======== Domains ======== */
 function pgDom(el) {
   api.get('/api/domains').then(function(d) {
-    el.innerHTML = '<h2 class="page-title">🌐 Domains</h2><p class="page-sub">Virtual host management</p><div id="domMsg"></div>'
-      + '<div class="flex-row"><input type="text" id="newDom" class="form-control" placeholder="example.com" style="max-width:300px">'
-      + '<button class="btn btn-p" onclick="addDom()">Add Domain</button></div>'
-      + '<table class="tbl"><thead><tr><th>Domain</th><th>Document Root</th><th>Actions</th></tr></thead><tbody>'
-      + d.map(function(x) {
-        var encDoc = encodeURIComponent(x.docRoot);
-        return '<tr><td><strong>' + esc(x.name) + '</strong></td><td><code>' + esc(x.docRoot) + '</code></td>'
-          + '<td><button class="btn btn-p btn-sm" data-nav="' + encDoc + '" onclick="navF(this);loadPage(\'files\')">Files</button> '
-          + '<button class="btn btn-d btn-sm" data-dom="' + esc(x.name) + '" onclick="delDom(this)">Delete</button></td></tr>';
-      }).join('')
-      + (d.length === 0 ? '<tr><td colspan="3" style="text-align:center;color:#8a8d93">No domains yet</td></tr>' : '')
-      + '</tbody></table>';
+    el.innerHTML='<h2 class="page-title">🌐 Domains</h2><p class="page-sub">Virtual host management</p><div id="domMsg"></div>'
+      +'<div class="flex-row"><input type="text" id="newDom" class="form-control" placeholder="example.com" style="max-width:300px"><button class="btn btn-p" onclick="addDom()">Add Domain</button></div>'
+      +'<table class="tbl"><thead><tr><th>Domain</th><th>Document Root</th><th>Actions</th></tr></thead><tbody>'
+      +d.map(function(x){
+        return '<tr><td><strong>'+esc(x.name)+'</strong></td><td><code>'+esc(x.docRoot)+'</code></td>'
+          +'<td><button class="btn btn-p btn-sm" data-nav="'+encodeURIComponent(x.docRoot)+'" onclick="navF(this);loadPage(\'files\')">Files</button> '
+          +'<button class="btn btn-d btn-sm" data-dom="'+esc(x.name)+'" onclick="delDom(this)">Delete</button></td></tr>';
+      }).join('')+(d.length===0?'<tr><td colspan="3" style="text-align:center;color:#8a8d93">No domains yet</td></tr>':'')
+      +'</tbody></table>';
   });
 }
-
-window.addDom = function() {
-  var domain = $('newDom').value.trim();
-  if (!domain) return;
-  api.post('/api/domains', { domain: domain }).then(function(r) {
-    $('domMsg').innerHTML = r.success ? '<div class="alert alert-ok">Domain added! OLS restarted.</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
-    if (r.success) setTimeout(function() { loadPage('domains'); }, 1200);
+window.addDom=function(){
+  var domain=$('newDom').value.trim(); if(!domain)return;
+  api.post('/api/domains',{domain:domain}).then(function(r){
+    $('domMsg').innerHTML=r.success?'<div class="alert alert-ok">Domain added!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('domains')},1200);
   });
 };
+window.delDom=function(btn){ var n=btn.dataset.dom; if(confirm('Delete domain '+n+'?'))api.del('/api/domains/'+n).then(function(){loadPage('domains')}); };
 
-window.delDom = function(btn) {
-  var n = btn.dataset.dom;
-  if (confirm('Delete domain ' + n + '?')) {
-    api.del('/api/domains/' + n).then(function(r) {
-      if (r.success) loadPage('domains');
-      else alert('Error: ' + (r.error || ''));
-    });
-  }
-};
-
-/* ======== Databases ======== */
 function pgDb(el) {
-  Promise.all([api.get('/api/databases'), api.get('/api/dashboard')]).then(function(res) {
-    var d = res[0], info = res[1];
-    el.innerHTML = '<h2 class="page-title">🗃️ Databases</h2><p class="page-sub">MariaDB management</p><div id="dbMsg"></div>'
-      + '<div class="flex-row">'
-      + '<div><label style="font-size:12px;color:#8a8d93">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
-      + '<div><label style="font-size:12px;color:#8a8d93">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
-      + '<div><label style="font-size:12px;color:#8a8d93">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
-      + '<button class="btn btn-p" onclick="addDb()">Create</button></div>'
-      + '<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
-      + (Array.isArray(d) ? d : []).map(function(x) {
-        return '<tr><td><strong>' + esc(x) + '</strong></td><td><button class="btn btn-d btn-sm" data-db="' + esc(x) + '" onclick="dropDb(this)">Drop</button></td></tr>';
-      }).join('')
-      + '</tbody></table>'
-      + '<div class="mt"><a href="http://' + info.ip + ':8088/phpmyadmin/" target="_blank" class="btn btn-w">Open phpMyAdmin</a></div>';
+  Promise.all([api.get('/api/databases'),api.get('/api/dashboard')]).then(function(res){
+    var d=res[0],info=res[1];
+    el.innerHTML='<h2 class="page-title">🗃️ Databases</h2><p class="page-sub">MariaDB management</p><div id="dbMsg"></div>'
+      +'<div class="flex-row">'
+      +'<div><label style="font-size:12px;color:#8a8d93">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
+      +'<div><label style="font-size:12px;color:#8a8d93">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
+      +'<div><label style="font-size:12px;color:#8a8d93">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
+      +'<button class="btn btn-p" onclick="addDb()">Create</button></div>'
+      +'<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
+      +(Array.isArray(d)?d:[]).map(function(x){return '<tr><td><strong>'+esc(x)+'</strong></td><td><button class="btn btn-d btn-sm" data-db="'+esc(x)+'" onclick="dropDb(this)">Drop</button></td></tr>';}).join('')
+      +'</tbody></table><div class="mt"><a href="http://'+info.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w">Open phpMyAdmin</a></div>';
   });
 }
-
-window.addDb = function() {
-  api.post('/api/databases', { name: $('dbName').value, user: $('dbUser').value, password: $('dbPass').value }).then(function(r) {
-    $('dbMsg').innerHTML = r.success ? '<div class="alert alert-ok">Database created!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
-    if (r.success) setTimeout(function() { loadPage('databases'); }, 1000);
+window.addDb=function(){
+  api.post('/api/databases',{name:$('dbName').value,user:$('dbUser').value,password:$('dbPass').value}).then(function(r){
+    $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok">Created!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('databases')},1000);
   });
 };
+window.dropDb=function(btn){ var n=btn.dataset.db; if(confirm('DROP '+n+'?'))api.del('/api/databases/'+n).then(function(){loadPage('databases')}); };
 
-window.dropDb = function(btn) {
-  var n = btn.dataset.db;
-  if (confirm('DROP database ' + n + '? This cannot be undone!')) {
-    api.del('/api/databases/' + n).then(function() { loadPage('databases'); });
-  }
-};
-
-/* ======== Tunnel ======== */
 function pgTun(el) {
-  api.get('/api/tunnel/status').then(function(s) {
-    el.innerHTML = '<h2 class="page-title">☁️ Cloudflare Tunnel</h2><p class="page-sub">Secure tunnel to your server</p><div id="tunMsg"></div>'
-      + '<div class="card mb"><div class="label">Status</div><span class="badge ' + (s.active ? 'badge-on' : 'badge-off') + '">' + (s.active ? 'Connected' : 'Not Connected') + '</span></div>'
-      + '<div class="card"><h3 class="mb">Setup Tunnel</h3>'
-      + '<p style="color:#8a8d93;margin-bottom:15px;font-size:14px">1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:#4f8cff">Cloudflare Zero Trust</a><br>2. Create a Tunnel → copy token<br>3. Paste below</p>'
-      + '<div class="flex-row"><input id="tunToken" class="form-control" placeholder="Tunnel token..." style="flex:1"><button class="btn btn-p" onclick="setTun()">Connect</button></div></div>';
+  api.get('/api/tunnel/status').then(function(s){
+    el.innerHTML='<h2 class="page-title">☁️ Cloudflare Tunnel</h2><p class="page-sub">Secure tunnel</p><div id="tunMsg"></div>'
+      +'<div class="card mb"><div class="label">Status</div><span class="badge '+(s.active?'badge-on':'badge-off')+'">'+(s.active?'Connected':'Not Connected')+'</span></div>'
+      +'<div class="card"><h3 class="mb">Setup Tunnel</h3>'
+      +'<p style="color:#8a8d93;margin-bottom:15px;font-size:14px">1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:#4f8cff">Cloudflare Zero Trust</a><br>2. Create a Tunnel → copy token<br>3. Paste below</p>'
+      +'<div class="flex-row"><input id="tunToken" class="form-control" placeholder="Tunnel token..." style="flex:1"><button class="btn btn-p" onclick="setTun()">Connect</button></div></div>';
   });
 }
-window.setTun = function() {
-  api.post('/api/tunnel/setup', { token: $('tunToken').value.trim() }).then(function(r) {
-    $('tunMsg').innerHTML = r.success ? '<div class="alert alert-ok">Tunnel connected!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
-    if (r.success) setTimeout(function() { loadPage('tunnel'); }, 2000);
+window.setTun=function(){
+  api.post('/api/tunnel/setup',{token:$('tunToken').value.trim()}).then(function(r){
+    $('tunMsg').innerHTML=r.success?'<div class="alert alert-ok">Connected!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('tunnel')},2000);
   });
 };
 
-/* ======== Terminal ======== */
 function pgTerm(el) {
-  el.innerHTML = '<h2 class="page-title">💻 Terminal</h2><p class="page-sub">Run commands on server</p>'
-    + '<div class="terminal-box" id="termOut">$ </div>'
-    + '<div class="term-input"><input id="termIn" placeholder="Type command..." onkeydown="if(event.key===\'Enter\')runCmd()"><button class="btn btn-p" onclick="runCmd()">Run</button></div>';
+  el.innerHTML='<h2 class="page-title">💻 Terminal</h2><p class="page-sub">Run commands</p>'
+    +'<div class="terminal-box" id="termOut">$ </div>'
+    +'<div class="term-input"><input id="termIn" placeholder="Type command..." onkeydown="if(event.key===\'Enter\')runCmd()"><button class="btn btn-p" onclick="runCmd()">Run</button></div>';
   $('termIn').focus();
 }
-window.runCmd = function() {
-  var cmd = $('termIn').value.trim(); if (!cmd) return;
-  var out = $('termOut');
-  out.textContent += cmd + '\n';
-  $('termIn').value = '';
-  api.post('/api/terminal', { command: cmd }).then(function(r) {
-    out.textContent += (r.output || '') + '\n$ ';
-    out.scrollTop = out.scrollHeight;
-  });
+window.runCmd=function(){
+  var cmd=$('termIn').value.trim(); if(!cmd)return;
+  var out=$('termOut'); out.textContent+=cmd+'\n'; $('termIn').value='';
+  api.post('/api/terminal',{command:cmd}).then(function(r){ out.textContent+=(r.output||'')+'\n$ '; out.scrollTop=out.scrollHeight; });
 };
 
-/* ======== Settings ======== */
 function pgSet(el) {
-  el.innerHTML = '<h2 class="page-title">🔧 Settings</h2><p class="page-sub">Panel configuration</p><div id="setMsg"></div>'
-    + '<div class="card" style="max-width:400px"><h3 class="mb">Change Password</h3>'
-    + '<div class="mb"><label style="font-size:12px;color:#8a8d93">Current Password</label><input type="password" id="curPass" class="form-control"></div>'
-    + '<div class="mb"><label style="font-size:12px;color:#8a8d93">New Password</label><input type="password" id="newPass" class="form-control"></div>'
-    + '<div class="mb"><label style="font-size:12px;color:#8a8d93">Confirm Password</label><input type="password" id="cfmPass" class="form-control"></div>'
-    + '<button class="btn btn-p" onclick="chgPass()">Update Password</button></div>';
+  el.innerHTML='<h2 class="page-title">🔧 Settings</h2><p class="page-sub">Panel configuration</p><div id="setMsg"></div>'
+    +'<div class="card" style="max-width:400px"><h3 class="mb">Change Password</h3>'
+    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">Current Password</label><input type="password" id="curPass" class="form-control"></div>'
+    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">New Password</label><input type="password" id="newPass" class="form-control"></div>'
+    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">Confirm Password</label><input type="password" id="cfmPass" class="form-control"></div>'
+    +'<button class="btn btn-p" onclick="chgPass()">Update Password</button></div>';
 }
-window.chgPass = function() {
-  var np = $('newPass').value, cp = $('cfmPass').value;
-  if (np !== cp) { $('setMsg').innerHTML = '<div class="alert alert-err">Passwords don\'t match</div>'; return; }
-  if (np.length < 6) { $('setMsg').innerHTML = '<div class="alert alert-err">Min 6 characters</div>'; return; }
-  api.post('/api/settings/password', { currentPassword: $('curPass').value, newPassword: np }).then(function(r) {
-    $('setMsg').innerHTML = r.success ? '<div class="alert alert-ok">Password updated!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+window.chgPass=function(){
+  var np=$('newPass').value,cp=$('cfmPass').value;
+  if(np!==cp){$('setMsg').innerHTML='<div class="alert alert-err">Passwords don\'t match</div>';return;}
+  if(np.length<6){$('setMsg').innerHTML='<div class="alert alert-err">Min 6 characters</div>';return;}
+  api.post('/api/settings/password',{currentPassword:$('curPass').value,newPassword:np}).then(function(r){
+    $('setMsg').innerHTML=r.success?'<div class="alert alert-ok">Updated!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
   });
 };
 
-/* ---- Init ---- */
 checkAuth();
 JSEOF
 
@@ -1144,11 +1128,10 @@ if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
 \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
 PMAEOF
-
   chown -R nobody:nogroup ${PMA_DIR}
   log "phpMyAdmin installed"
 else
-  err "phpMyAdmin download failed (install manually later)"
+  err "phpMyAdmin download failed"
 fi
 
 ########################################
@@ -1167,7 +1150,7 @@ if [ -f cloudflared.deb ] && [ -s cloudflared.deb ]; then
   rm -f cloudflared.deb
   log "Cloudflared installed"
 else
-  err "Cloudflared download failed (install manually later)"
+  err "Cloudflared download failed"
 fi
 
 apt-get install -y -qq fail2ban > /dev/null 2>&1
@@ -1178,8 +1161,6 @@ log "Fail2Ban installed"
 ########################################
 step "Step 9/9: Configure Firewall + Start Services"
 ########################################
-
-# Systemd service for LitePanel
 cat > /etc/systemd/system/litepanel.service <<SVCEOF
 [Unit]
 Description=LitePanel Control Panel
@@ -1201,26 +1182,19 @@ systemctl daemon-reload
 systemctl enable litepanel > /dev/null 2>&1
 systemctl start litepanel
 
-# Firewall
 ufw --force reset > /dev/null 2>&1
 ufw default deny incoming > /dev/null 2>&1
 ufw default allow outgoing > /dev/null 2>&1
-ufw allow 22/tcp > /dev/null 2>&1
-ufw allow 80/tcp > /dev/null 2>&1
-ufw allow 443/tcp > /dev/null 2>&1
-ufw allow ${PANEL_PORT}/tcp > /dev/null 2>&1
-ufw allow 7080/tcp > /dev/null 2>&1
-ufw allow 8088/tcp > /dev/null 2>&1
+for port in 22 80 443 ${PANEL_PORT} 7080 8088; do
+  ufw allow ${port}/tcp > /dev/null 2>&1
+done
 ufw --force enable > /dev/null 2>&1
 log "Firewall configured"
 
-# Restart OLS with new config
 systemctl restart lsws 2>/dev/null
 systemctl restart mariadb 2>/dev/null
-
 sleep 3
 
-# Save credentials
 cat > /root/.litepanel_credentials <<CREDEOF
 ==========================================
   LitePanel Credentials
@@ -1246,16 +1220,15 @@ echo -e "${C}╔═════════════════════�
 echo -e "${C}║         ✅ Installation Complete!             ║${N}"
 echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  LitePanel:  ${G}http://${SERVER_IP}:${PANEL_PORT}${N}"
-echo -e "${C}║${N}  OLS Admin:  ${G}http://${SERVER_IP}:7080${N}"
-echo -e "${C}║${N}  phpMyAdmin: ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
-echo -e "${C}║${N}  Websites:   ${G}http://${SERVER_IP}:80${N} (port 80)"
+echo -e "${C}║${N}  LitePanel:   ${G}http://${SERVER_IP}:${PANEL_PORT}${N}"
+echo -e "${C}║${N}  OLS Admin:   ${G}http://${SERVER_IP}:7080${N}"
+echo -e "${C}║${N}  phpMyAdmin:  ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  Panel Login: ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
-echo -e "${C}║${N}  OLS Admin:   ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
+echo -e "${C}║${N}  Panel Login:  ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
+echo -e "${C}║${N}  OLS Admin:    ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
 echo -e "${C}║${N}  DB Root Pass: ${Y}${DB_ROOT_PASS}${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  Credentials: ${B}/root/.litepanel_credentials${N}"
+echo -e "${C}║${N}  Saved: ${B}/root/.litepanel_credentials${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}╚══════════════════════════════════════════════╝${N}"
 echo ""

@@ -181,11 +181,12 @@ log "OpenLiteSpeed installed"
 # ============================================
 log "Installing PHP 8.1 required extensions..."
 apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl \
-  lsphp81-json lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd lsphp81-mysqli > /tmp/php_install.log 2>&1
+  lsphp81-json lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd lsphp81-mysqli \
+  lsphp81-pdo lsphp81-opcache lsphp81-iconv > /tmp/php_install.log 2>&1
 PHP_RC=$?
 
 # Optional PHP extensions (OK if some fail)
-apt-get install -y -qq lsphp81-intl lsphp81-iconv lsphp81-opcache >> /tmp/php_install.log 2>&1
+apt-get install -y -qq lsphp81-intl >> /tmp/php_install.log 2>&1
 
 if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
   ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php
@@ -297,11 +298,11 @@ EXVHEOF
     sed -i '/context phpmyadmin {/,/}/d' "$EXAMPLE_VHCONF"
   fi
   
-  # Add the correct context definition
+  # Add the correct context definition with proper location path
   cat >> "$EXAMPLE_VHCONF" <<'PMACTXEOF'
 
 context phpmyadmin {
-  location                phpmyadmin
+  location                html/phpmyadmin
   allowBrowse             1
   uri                     /phpmyadmin
   type                    NULL
@@ -362,10 +363,44 @@ for i in $(seq 1 15); do
 done
 
 if mysqladmin ping &>/dev/null; then
-  # Get MariaDB socket path
-  MYSQL_SOCK=$(mysqladmin variables | grep "socket" | awk '{ print $4 }')
+  # Get MariaDB socket path with improved detection
+  MYSQL_SOCK=""
+  
+  # Method 1: Check my.cnf files
+  for config in /etc/mysql/my.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/my.cnf; do
+    if [ -f "$config" ]; then
+      SOCK=$(grep -v "#" "$config" | grep "socket" | head -1 | awk -F'=' '{print $2}' | tr -d ' ')
+      if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
+        MYSQL_SOCK="$SOCK"
+        break
+      fi
+    fi
+  done
+  
+  # Method 2: Use mysqladmin
+  if [ -z "$MYSQL_SOCK" ]; then
+    SOCK=$(mysqladmin variables 2>/dev/null | grep "socket" | awk '{print $4}')
+    if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
+      MYSQL_SOCK="$SOCK"
+    fi
+  fi
+  
+  # Method 3: Check common locations
+  if [ -z "$MYSQL_SOCK" ]; then
+    for sock in "/var/run/mysqld/mysqld.sock" "/var/lib/mysql/mysql.sock" "/tmp/mysql.sock"; do
+      if [ -S "$sock" ]; then
+        MYSQL_SOCK="$sock"
+        break
+      fi
+    done
+  fi
+  
+  # Default fallback
   if [ -z "$MYSQL_SOCK" ]; then
     MYSQL_SOCK="/var/run/mysqld/mysqld.sock"
+    warn "Could not detect MySQL socket, using default: $MYSQL_SOCK"
+  else
+    log "Detected MySQL socket: $MYSQL_SOCK"
   fi
   
   # Configure MariaDB with mysql_native_password for compatibility - FIXED VERSION
@@ -377,6 +412,14 @@ if mysqladmin ping &>/dev/null; then
     DROP DATABASE IF EXISTS test;
     FLUSH PRIVILEGES;
   "
+  
+  # Verify mysql_native_password is being used
+  PLUGIN=$(mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT plugin FROM mysql.user WHERE user='root' AND host='localhost';" -s -N)
+  if [ "$PLUGIN" != "mysql_native_password" ]; then
+    warn "MySQL authentication plugin is not mysql_native_password. Fixing..."
+    mysql -u root -p"${DB_ROOT_PASS}" -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+  fi
+  
   log "MariaDB installed & secured"
   log "Using MySQL socket: ${MYSQL_SOCK}"
 else
@@ -797,10 +840,44 @@ if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
   cp -rf phpMyAdmin-*/* ${PMA_DIR}/
   rm -rf phpMyAdmin-* pma.tar.gz
 
-  # Get MariaDB socket path
-  MYSQL_SOCK=$(mysqladmin variables 2>/dev/null | grep "socket" | awk '{ print $4 }')
+  # Get MariaDB socket path with improved detection
+  MYSQL_SOCK=""
+  
+  # Method 1: Check my.cnf files
+  for config in /etc/mysql/my.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/my.cnf; do
+    if [ -f "$config" ]; then
+      SOCK=$(grep -v "#" "$config" | grep "socket" | head -1 | awk -F'=' '{print $2}' | tr -d ' ')
+      if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
+        MYSQL_SOCK="$SOCK"
+        break
+      fi
+    fi
+  done
+  
+  # Method 2: Use mysqladmin
+  if [ -z "$MYSQL_SOCK" ]; then
+    SOCK=$(mysqladmin variables 2>/dev/null | grep "socket" | awk '{print $4}')
+    if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
+      MYSQL_SOCK="$SOCK"
+    fi
+  fi
+  
+  # Method 3: Check common locations
+  if [ -z "$MYSQL_SOCK" ]; then
+    for sock in "/var/run/mysqld/mysqld.sock" "/var/lib/mysql/mysql.sock" "/tmp/mysql.sock"; do
+      if [ -S "$sock" ]; then
+        MYSQL_SOCK="$sock"
+        break
+      fi
+    done
+  fi
+  
+  # Default fallback
   if [ -z "$MYSQL_SOCK" ]; then
     MYSQL_SOCK="/var/run/mysqld/mysqld.sock"
+    warn "Could not detect MySQL socket, using default: $MYSQL_SOCK"
+  else
+    log "Detected MySQL socket: $MYSQL_SOCK"
   fi
 
   BLOWFISH=$(openssl rand -hex 16)
@@ -826,8 +903,9 @@ if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
 \$cfg['ServerDefault'] = 1;
 \$cfg['UploadDir'] = '';
 \$cfg['SaveDir'] = '';
-\$cfg['PmaAbsoluteUri'] = 'http://${SERVER_IP}:8088/phpmyadmin/';
-\$cfg['TempDir'] = '/tmp';
+\$cfg['TempDir'] = '${PMA_DIR}/tmp';
+/* Using relative path instead of fixed IP */
+\$cfg['PmaAbsoluteUri'] = '';
 
 /* User Interface */
 \$cfg['ExecTimeLimit'] = 300;
@@ -846,14 +924,16 @@ PMAEOF
   
   # Create the tmp directory with proper permissions
   mkdir -p ${PMA_DIR}/tmp
-  chmod 777 ${PMA_DIR}/tmp
+  chmod 750 ${PMA_DIR}/tmp
 
-  # Set correct permissions
+  # Set correct permissions with principle of least privilege
   chown -R nobody:nogroup ${PMA_DIR}
+  chmod 750 ${PMA_DIR}
   
   log "phpMyAdmin installed with socket: ${MYSQL_SOCK}"
 
-  # Create symbolic links for better path handling - FIXED VERSION
+  # We don't need symlinks anymore because we fixed the context path configuration
+  # But keep for compatibility with existing code that might reference these paths
   if [ ! -L "/usr/local/lsws/Example/html/phpMyAdmin" ]; then
     ln -sf ${PMA_DIR} /usr/local/lsws/Example/html/phpMyAdmin
   fi
@@ -896,13 +976,21 @@ apt-get install -y fail2ban
 systemctl enable fail2ban > /dev/null 2>&1
 systemctl start fail2ban
 
-# Configure Fail2Ban for SSH - ENHANCED
+# Configure Fail2Ban for SSH and HTTP - ENHANCED
 cat > /etc/fail2ban/jail.d/custom.conf <<'BANEOF'
 [sshd]
 enabled = true
 port = ssh
 filter = sshd
 logpath = /var/log/auth.log
+maxretry = 5
+bantime = 3600
+
+[apache-auth]
+enabled = true
+port = http,https,8088
+filter = apache-auth
+logpath = /var/log/lsws/*.log
 maxretry = 5
 bantime = 3600
 BANEOF
@@ -948,6 +1036,7 @@ systemctl restart lsws
 systemctl restart mariadb
 sleep 3
 
+# Create credentials file with better permissions
 cat > /root/.litepanel_credentials <<CREDEOF
 ==========================================
   LitePanel Credentials (SECURELY STORE THIS FILE)
@@ -1008,4 +1097,16 @@ if curl -s "http://localhost:8088/phpmyadmin/" | grep -q "phpMyAdmin"; then
   log "phpMyAdmin is working correctly!"
 else
   warn "phpMyAdmin test failed. Please check manually."
+  # Try to diagnose the issue
+  if [ ! -f "${PMA_DIR}/index.php" ]; then
+    err "phpMyAdmin files not found in ${PMA_DIR}"
+  elif [ ! -S "${MYSQL_SOCK}" ]; then
+    err "MySQL socket not found at ${MYSQL_SOCK}"
+  else
+    warn "Running additional diagnostic commands:"
+    echo "PHP modules installed:"
+    php -m | sort
+    echo "Testing MySQL connectivity:"
+    php -r "if (extension_loaded('mysqli')) { \$link = mysqli_connect('localhost', 'root', '${DB_ROOT_PASS}'); echo \$link ? 'Connected successfully' : 'Connection failed: ' . mysqli_connect_error(); } else { echo 'mysqli extension not loaded'; }"
+  fi
 fi

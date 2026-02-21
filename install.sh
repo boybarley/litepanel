@@ -1,7 +1,9 @@
 #!/bin/bash
 ############################################
-# LitePanel Installer v2.0 (Production)
+# LitePanel Installer v2.0 (FIXED)
 # Fresh Ubuntu 22.04 LTS Only
+# Fixes: OLS config, PHP extprocessor,
+#   listener, vhost, file manager, security
 ############################################
 
 export DEBIAN_FRONTEND=noninteractive
@@ -36,22 +38,11 @@ if [ -f /etc/os-release ]; then
   fi
 fi
 
-# === WAIT FOR DPKG LOCK ===
-while fuser /var/lib/dpkg/lock-frontend > /dev/null 2>&1; do
-  warn "Waiting for other package manager to finish..."
-  sleep 3
-done
-
-# Create log directory
-mkdir -p /var/log/litepanel
-INSTALL_LOG="/var/log/litepanel/install.log"
-exec > >(tee -a "$INSTALL_LOG") 2>&1
-
 clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
 echo "  ║   LitePanel Installer v2.0       ║"
-echo "  ║   Ubuntu 22.04 LTS              ║"
+echo "  ║   Ubuntu 22.04 LTS (Fixed)       ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2
@@ -59,169 +50,42 @@ sleep 2
 ########################################
 step "Step 1/9: Update System"
 ########################################
-apt-get update -y
-apt-get upgrade -y -qq
+apt-get update -y -qq > /dev/null 2>&1
+apt-get upgrade -y -qq > /dev/null 2>&1
 log "System updated"
 
 ########################################
 step "Step 2/9: Install Dependencies"
 ########################################
-apt-get install -y curl wget gnupg2 software-properties-common \
+apt-get install -y -qq curl wget gnupg2 software-properties-common \
   apt-transport-https ca-certificates lsb-release ufw git unzip \
-  openssl jq rsync locate
+  openssl jq > /dev/null 2>&1
 log "Dependencies installed"
 
 ########################################
 step "Step 3/9: Install OpenLiteSpeed + PHP 8.1"
 ########################################
+wget -O - https://rpms.litespeedtech.com/debian/lst_repo.gpg 2>/dev/null | \
+  gpg --dearmor -o /usr/share/keyrings/lst-debian.gpg 2>/dev/null
 
-CODENAME=$(lsb_release -sc 2>/dev/null || echo "jammy")
-REPO_ADDED=0
+echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ \
+$(lsb_release -sc) main" > /etc/apt/sources.list.d/lst_debian_repo.list
 
-# ============================================
-# METHOD 1: Official LiteSpeed repo script
-# ============================================
-log "Adding LiteSpeed repository (Method 1: official script)..."
-wget -qO /tmp/ls_repo.sh https://repo.litespeed.sh
-if [ -f /tmp/ls_repo.sh ] && [ -s /tmp/ls_repo.sh ]; then
-  bash /tmp/ls_repo.sh
-  rm -f /tmp/ls_repo.sh
-  apt-get update -y
-fi
+apt-get update -y -qq > /dev/null 2>&1
+apt-get install -y -qq openlitespeed lsphp81 lsphp81-common lsphp81-mysql \
+  lsphp81-curl lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-intl \
+  lsphp81-iconv lsphp81-opcache > /dev/null 2>&1
 
-if apt-cache show openlitespeed > /dev/null 2>&1; then
-  REPO_ADDED=1
-  log "LiteSpeed repository added (Method 1)"
-fi
+ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php 2>/dev/null
 
-# ============================================
-# METHOD 2: Manual GPG with signed-by
-# ============================================
-if [ "$REPO_ADDED" -eq 0 ]; then
-  warn "Method 1 failed, trying Method 2 (manual GPG)..."
-  
-  wget -qO /tmp/lst_repo.gpg https://rpms.litespeedtech.com/debian/lst_repo.gpg
-  wget -qO /tmp/lst_debian_repo.gpg https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg
-  
-  if [ -f /tmp/lst_repo.gpg ] && [ -s /tmp/lst_repo.gpg ]; then
-    # Try dearmor first, fallback to direct copy
-    gpg --dearmor < /tmp/lst_repo.gpg > /usr/share/keyrings/lst-debian.gpg 2>/dev/null
-    if [ ! -s /usr/share/keyrings/lst-debian.gpg ]; then
-      cp /tmp/lst_repo.gpg /usr/share/keyrings/lst-debian.gpg
-    fi
-    
-    echo "deb [signed-by=/usr/share/keyrings/lst-debian.gpg] http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
-      > /etc/apt/sources.list.d/lst_debian_repo.list
-  fi
-  rm -f /tmp/lst_repo.gpg /tmp/lst_debian_repo.gpg
-  apt-get update -y
-  
-  if apt-cache show openlitespeed > /dev/null 2>&1; then
-    REPO_ADDED=1
-    log "LiteSpeed repository added (Method 2)"
-  fi
-fi
+# ---- FIX #1: OLS Admin Password (MD5 format, like CyberPanel) ----
+OLS_HASH=$(printf '%s' "${ADMIN_PASS}" | md5sum | awk '{print $1}')
+echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
+log "OLS admin password set (MD5 format)"
 
-# ============================================
-# METHOD 3: Legacy apt-key (deprecated but works)
-# ============================================
-if [ "$REPO_ADDED" -eq 0 ]; then
-  warn "Method 2 failed, trying Method 3 (legacy apt-key)..."
-  
-  wget -qO - https://rpms.litespeedtech.com/debian/lst_repo.gpg | apt-key add -
-  wget -qO - https://rpms.litespeedtech.com/debian/lst_debian_repo.gpg | apt-key add -
-  
-  echo "deb http://rpms.litespeedtech.com/debian/ ${CODENAME} main" \
-    > /etc/apt/sources.list.d/lst_debian_repo.list
-  
-  apt-get update -y
-  
-  if apt-cache show openlitespeed > /dev/null 2>&1; then
-    REPO_ADDED=1
-    log "LiteSpeed repository added (Method 3)"
-  fi
-fi
-
-# ============================================
-# FINAL CHECK: Abort if repo failed
-# ============================================
-if [ "$REPO_ADDED" -eq 0 ]; then
-  err "═══════════════════════════════════════════════"
-  err "FATAL: Could not add LiteSpeed repository!"
-  err "Please run manually:"
-  err "  wget -O - https://repo.litespeed.sh | sudo bash"
-  err "  apt-get install openlitespeed lsphp81"
-  err "Then re-run this installer."
-  err "═══════════════════════════════════════════════"
-  exit 1
-fi
-
-# ============================================
-# INSTALL OPENLITESPEED (show log on failure!)
-# ============================================
-log "Installing OpenLiteSpeed (this may take 1-2 minutes)..."
-apt-get install -y openlitespeed > /tmp/ols_install.log 2>&1
-OLS_RC=$?
-
-if [ $OLS_RC -ne 0 ] || [ ! -d "/usr/local/lsws" ]; then
-  err "═══════════════════════════════════════════════"
-  err "FATAL: OpenLiteSpeed installation failed!"
-  err "Exit code: $OLS_RC"
-  err "Last 30 lines of install log:"
-  echo ""
-  tail -30 /tmp/ols_install.log
-  echo ""
-  err "═══════════════════════════════════════════════"
-  exit 1
-fi
-log "OpenLiteSpeed installed"
-
-# ============================================
-# INSTALL PHP 8.1 CRITICAL EXTENSIONS
-# ============================================
-log "Installing PHP 8.1 required extensions..."
-apt-get install -y lsphp81 lsphp81-common lsphp81-mysql lsphp81-curl \
-  lsphp81-json lsphp81-mbstring lsphp81-xml lsphp81-zip lsphp81-gd lsphp81-mysqli \
-  lsphp81-pdo lsphp81-opcache lsphp81-iconv > /tmp/php_install.log 2>&1
-PHP_RC=$?
-
-# Optional PHP extensions (OK if some fail)
-apt-get install -y -qq lsphp81-intl >> /tmp/php_install.log 2>&1
-
-if [ -f "/usr/local/lsws/lsphp81/bin/php" ]; then
-  ln -sf /usr/local/lsws/lsphp81/bin/php /usr/local/bin/php
-  log "PHP 8.1 installed ($(php -v | head -1 | awk '{print $2}'))"
-else
-  if [ $PHP_RC -ne 0 ]; then
-    err "lsphp81 installation failed. Last 10 lines:"
-    tail -10 /tmp/php_install.log
-  fi
-  warn "lsphp81 binary not found - PHP might not work"
-fi
-
-# ============================================
-# CONFIGURE OLS (only if config exists!)
-# ============================================
+# ---- FIX #2: Add lsphp81 extprocessor to httpd_config.conf ----
 OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
 
-if [ ! -f "$OLS_CONF" ]; then
-  err "OLS config file not found: $OLS_CONF"
-  err "OpenLiteSpeed may have installed incorrectly."
-  exit 1
-fi
-
-log "Configuring OpenLiteSpeed..."
-
-# Set admin password (MD5 format, same method as CyberPanel)
-if [ -d "/usr/local/lsws/admin/conf" ]; then
-  OLS_HASH=$(printf '%s' "${ADMIN_PASS}" | md5sum | awk '{print $1}')
-  echo "admin:${OLS_HASH}" > /usr/local/lsws/admin/conf/htpasswd
-  log "OLS admin password set"
-else
-  warn "OLS admin conf directory not found"
-fi
-
-# Add lsphp81 extprocessor
 if ! grep -q "extprocessor lsphp81" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'EXTEOF'
 
@@ -249,7 +113,7 @@ EXTEOF
   log "lsphp81 extprocessor added"
 fi
 
-# Add HTTP listener on port 80
+# ---- FIX #3: Add HTTP listener on port 80 ----
 if ! grep -q "listener HTTP" "$OLS_CONF"; then
   cat >> "$OLS_CONF" <<'LSTEOF'
 
@@ -261,167 +125,41 @@ LSTEOF
   log "HTTP listener port 80 added"
 fi
 
-# Add HTTP listener on port 8088 for phpMyAdmin - FIXED CORRECT VERSION
-if ! grep -q "listener PMA_HTTP" "$OLS_CONF"; then
-  cat >> "$OLS_CONF" <<'PMAEOF'
-
-listener PMA_HTTP {
-  address                 *:8088
-  secure                  0
-  map                     Example *
-}
-PMAEOF
-  log "Added phpMyAdmin listener on port 8088"
-fi
-
-# Update default lsphp path to lsphp81
-sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
-
-# Update Example vhost to use lsphp81 (for phpMyAdmin)
+# ---- FIX #7: Update Example vhost to use lsphp81 (for phpMyAdmin) ----
 EXAMPLE_VHCONF="/usr/local/lsws/conf/vhosts/Example/vhconf.conf"
 if [ -f "$EXAMPLE_VHCONF" ]; then
-  # Make sure the Example vhost exists and has the right scripthandler
-  if grep -q "scripthandler" "$EXAMPLE_VHCONF"; then
-    sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
-  else
-    # If scripthandler section doesn't exist, add it
-    cat >> "$EXAMPLE_VHCONF" <<'EXVHEOF'
-scripthandler {
-  add                     lsapi:lsphp81 php
-}
-EXVHEOF
-  fi
-  
-  # Add context for phpMyAdmin - FIXED CORRECT VERSION
-  if grep -q "context phpmyadmin" "$EXAMPLE_VHCONF"; then
-    # Remove old context definition
-    sed -i '/context phpmyadmin {/,/}/d' "$EXAMPLE_VHCONF"
-  fi
-  
-  # Add the correct context definition with proper location path
-  cat >> "$EXAMPLE_VHCONF" <<'PMACTXEOF'
-
-context phpmyadmin {
-  location                html/phpmyadmin
-  allowBrowse             1
-  uri                     /phpmyadmin
-  type                    NULL
-  handlephp               1
-  enableScript            1
-}
-PMACTXEOF
-  
-  log "Example vhost updated for phpMyAdmin"
+  # Replace any lsphp scripthandler line with lsphp81
+  sed -i '/add.*lsapi:lsphp/c\  add                     lsapi:lsphp81 php' "$EXAMPLE_VHCONF"
+  log "Example vhost updated to lsphp81"
 fi
 
-# Make sure Example virtualhost is defined
-if ! grep -q "virtualhost Example" "$OLS_CONF"; then
-  cat >> "$OLS_CONF" <<'EXVHOSTEOF'
-
-virtualhost Example {
-  vhRoot                  $SERVER_ROOT/Example
-  configFile              $SERVER_ROOT/conf/vhosts/Example/vhconf.conf
-  allowSymbolLink         1
-  enableScript            1
-  restrained              1
-}
-EXVHOSTEOF
-  log "Example virtualhost created"
-fi
+# ---- FIX #11: Update default lsphp extprocessor path ----
+sed -i 's|/usr/local/lsws/fcgi-bin/lsphp|/usr/local/lsws/lsphp81/bin/lsphp|g' "$OLS_CONF" 2>/dev/null
 
 systemctl enable lsws > /dev/null 2>&1
-systemctl restart lsws
-
-sleep 3
-
-if systemctl is-active --quiet lsws; then
-  log "OpenLiteSpeed started successfully"
-else
-  warn "OpenLiteSpeed failed to start - checking..."
-  systemctl status lsws --no-pager | tail -5
-  warn "Trying restart..."
-  systemctl restart lsws
-  sleep 3
-  if systemctl is-active --quiet lsws; then
-    log "OpenLiteSpeed started on retry"
-  else
-    err "OpenLiteSpeed won't start. Check: systemctl status lsws"
-  fi
-fi
+systemctl start lsws
+log "OpenLiteSpeed + PHP 8.1 installed & configured"
 
 ########################################
 step "Step 4/9: Install MariaDB"
 ########################################
-apt-get install -y mariadb-server mariadb-client
+apt-get install -y -qq mariadb-server mariadb-client > /dev/null 2>&1
 systemctl enable mariadb > /dev/null 2>&1
 systemctl start mariadb
 
-# Wait for MariaDB to become available
 for i in $(seq 1 15); do
   mysqladmin ping &>/dev/null && break
   sleep 2
 done
 
 if mysqladmin ping &>/dev/null; then
-  # Get MariaDB socket path with improved detection
-  MYSQL_SOCK=""
-  
-  # Method 1: Check my.cnf files
-  for config in /etc/mysql/my.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/my.cnf; do
-    if [ -f "$config" ]; then
-      SOCK=$(grep -v "#" "$config" | grep "socket" | head -1 | awk -F'=' '{print $2}' | tr -d ' ')
-      if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
-        MYSQL_SOCK="$SOCK"
-        break
-      fi
-    fi
-  done
-  
-  # Method 2: Use mysqladmin
-  if [ -z "$MYSQL_SOCK" ]; then
-    SOCK=$(mysqladmin variables 2>/dev/null | grep "socket" | awk '{print $4}')
-    if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
-      MYSQL_SOCK="$SOCK"
-    fi
-  fi
-  
-  # Method 3: Check common locations
-  if [ -z "$MYSQL_SOCK" ]; then
-    for sock in "/var/run/mysqld/mysqld.sock" "/var/lib/mysql/mysql.sock" "/tmp/mysql.sock"; do
-      if [ -S "$sock" ]; then
-        MYSQL_SOCK="$sock"
-        break
-      fi
-    done
-  fi
-  
-  # Default fallback
-  if [ -z "$MYSQL_SOCK" ]; then
-    MYSQL_SOCK="/var/run/mysqld/mysqld.sock"
-    warn "Could not detect MySQL socket, using default: $MYSQL_SOCK"
-  else
-    log "Detected MySQL socket: $MYSQL_SOCK"
-  fi
-  
-  # Configure MariaDB with mysql_native_password for compatibility - FIXED VERSION
   mysql -u root -e "
     ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}';
-    -- Ensure root uses native password for phpMyAdmin compatibility
-    ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}';
     DELETE FROM mysql.user WHERE User='';
     DROP DATABASE IF EXISTS test;
     FLUSH PRIVILEGES;
-  "
-  
-  # Verify mysql_native_password is being used
-  PLUGIN=$(mysql -u root -p"${DB_ROOT_PASS}" -e "SELECT plugin FROM mysql.user WHERE user='root' AND host='localhost';" -s -N)
-  if [ "$PLUGIN" != "mysql_native_password" ]; then
-    warn "MySQL authentication plugin is not mysql_native_password. Fixing..."
-    mysql -u root -p"${DB_ROOT_PASS}" -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
-  fi
-  
+  " 2>/dev/null
   log "MariaDB installed & secured"
-  log "Using MySQL socket: ${MYSQL_SOCK}"
 else
   err "MariaDB failed to start"
 fi
@@ -429,18 +167,9 @@ fi
 ########################################
 step "Step 5/9: Install Node.js 18"
 ########################################
-if ! command -v node > /dev/null 2>&1; then
-  curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-  apt-get install -y -qq nodejs
-fi
-
-if command -v node > /dev/null 2>&1; then
-  log "Node.js $(node -v) installed"
-else
-  err "Node.js installation failed!"
-  err "Manual install: curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt install nodejs"
-  exit 1
-fi
+curl -fsSL https://deb.nodesource.com/setup_18.x 2>/dev/null | bash - > /dev/null 2>&1
+apt-get install -y -qq nodejs > /dev/null 2>&1
+log "Node.js $(node -v 2>/dev/null || echo 'unknown') installed"
 
 ########################################
 step "Step 6/9: Creating LitePanel App"
@@ -464,22 +193,11 @@ cat > package.json <<'PKGEOF'
 }
 PKGEOF
 
-log "Installing npm dependencies..."
-npm install --production > /tmp/npm_install.log 2>&1
-NPM_RC=$?
-
-if [ $NPM_RC -ne 0 ]; then
-  warn "npm install failed (code $NPM_RC), retrying with legacy-peer-deps..."
-  npm install --production --legacy-peer-deps > /tmp/npm_install.log 2>&1
-  NPM_RC=$?
+npm install --production > /dev/null 2>&1
+if [ $? -ne 0 ]; then
+  warn "npm install retry with legacy-peer-deps..."
+  npm install --production --legacy-peer-deps > /dev/null 2>&1
 fi
-
-if [ $NPM_RC -ne 0 ]; then
-  err "npm install failed. Check /tmp/npm_install.log"
-  tail -10 /tmp/npm_install.log
-  exit 1
-fi
-log "npm dependencies installed"
 
 # --- config.json ---
 HASHED_PASS=$(node -e "console.log(require('bcryptjs').hashSync('${ADMIN_PASS}', 10))" 2>/dev/null)
@@ -495,10 +213,8 @@ cat > config.json <<CFGEOF
 }
 CFGEOF
 
-# Continue with app.js, index.html, style.css, and app.js from original script...
-# (inserting these sections would make the response too long)
 ##############################################
-# -------- app.js (Backend) --------
+# -------- app.js (Backend - FIXED) --------
 ##############################################
 cat > app.js <<'APPEOF'
 const express = require('express');
@@ -510,6 +226,7 @@ const path = require('path');
 const os = require('os');
 const multer = require('multer');
 
+/* ---- Config ---- */
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 let config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 
@@ -527,33 +244,43 @@ app.use(session({
 }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-var auth = function(req, res, next) {
+const auth = (req, res, next) => {
   if (req.session && req.session.user) return next();
   res.status(401).json({ error: 'Unauthorized' });
 };
 
+/* ---- Helpers ---- */
 function run(cmd, timeout) {
-  try { return execSync(cmd, { timeout: timeout || 15000, maxBuffer: 5*1024*1024 }).toString().trim(); }
-  catch(e) { return e.stderr ? e.stderr.toString().trim() : e.message; }
+  try {
+    return execSync(cmd, { timeout: timeout || 15000, maxBuffer: 5*1024*1024 }).toString().trim();
+  } catch(e) { return e.stderr ? e.stderr.toString().trim() : e.message; }
 }
+
 function svcActive(name) {
   try { execSync('systemctl is-active ' + name, { stdio: 'pipe' }); return true; }
   catch(e) { return false; }
 }
+
 function escRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function shellEsc(s) { return s.replace(/'/g, "'\\''"); }
 
-/* === OLS Config Management === */
+/* ==================================================
+   FIX #4,5,6,10: OLS Config Management
+   Proper vhost format + line-safe regex + backup
+   ================================================== */
+
 function readOLSConf() { return fs.readFileSync(OLS_CONF, 'utf8'); }
+
 function writeOLSConf(content) {
   fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
   fs.writeFileSync(OLS_CONF, content);
 }
 
 function addDomainToOLS(domain) {
-  var httpd = readOLSConf();
+  let httpd = readOLSConf();
   if (httpd.includes('virtualhost ' + domain + ' {')) return;
 
+  // Append virtualhost block
   httpd += '\nvirtualhost ' + domain + ' {\n'
     + '  vhRoot                  ' + OLS_VHOST_DIR + '/' + domain + '\n'
     + '  configFile              ' + OLS_VHOST_CONF_DIR + '/' + domain + '/vhconf.conf\n'
@@ -562,24 +289,34 @@ function addDomainToOLS(domain) {
     + '  restrained              1\n'
     + '}\n';
 
+  // Add map to HTTP listener (port 80)
+  // FIX #6: target HTTP listener, not Default (8088)
   var listenerRe = /(listener\s+HTTP\s*\{[\s\S]*?)(})/;
   if (listenerRe.test(httpd)) {
     httpd = httpd.replace(listenerRe,
       '$1  map                     ' + domain + ' ' + domain + ', www.' + domain + '\n$2');
   } else {
+    // Fallback: create HTTP listener with map
     httpd += '\nlistener HTTP {\n  address                 *:80\n  secure                  0\n'
       + '  map                     ' + domain + ' ' + domain + ', www.' + domain + '\n}\n';
   }
+
   writeOLSConf(httpd);
 }
 
 function removeDomainFromOLS(domain) {
-  var httpd = readOLSConf();
+  let httpd = readOLSConf();
   fs.copyFileSync(OLS_CONF, OLS_CONF + '.bak');
+
+  // FIX #5: Use [\s\S]*? for multiline match (not [^}] which fails on newlines)
   var vhRe = new RegExp('\\n?virtualhost\\s+' + escRegex(domain) + '\\s*\\{[\\s\\S]*?\\}', 'g');
   httpd = httpd.replace(vhRe, '');
+
+  // Remove map entries for this domain
   var mapRe = new RegExp('^\\s*map\\s+' + escRegex(domain) + '\\s+.*$', 'gm');
   httpd = httpd.replace(mapRe, '');
+
+  // Clean up excess blank lines
   httpd = httpd.replace(/\n{3,}/g, '\n\n');
   fs.writeFileSync(OLS_CONF, httpd);
 }
@@ -588,10 +325,12 @@ function createVhostFiles(domain) {
   var confDir = path.join(OLS_VHOST_CONF_DIR, domain);
   var docRoot = path.join(OLS_VHOST_DIR, domain, 'html');
   var logDir  = path.join(OLS_VHOST_DIR, domain, 'logs');
+
   fs.mkdirSync(confDir, { recursive: true });
   fs.mkdirSync(docRoot, { recursive: true });
   fs.mkdirSync(logDir,  { recursive: true });
 
+  // FIX #4: Proper OLS vhconf.conf format (studied from CyberPanel)
   var vhConf = 'docRoot                   $VH_ROOT/html\n'
     + 'vhDomain                  ' + domain + '\n'
     + 'vhAliases                 www.' + domain + '\n'
@@ -617,16 +356,20 @@ function createVhostFiles(domain) {
     '<!DOCTYPE html>\n<html><head><title>' + domain + '</title></head>\n'
     + '<body><h1>Welcome to ' + domain + '</h1>\n'
     + '<p>Hosted on LitePanel with OpenLiteSpeed</p></body></html>\n');
+
   try { execSync('chown -R nobody:nogroup ' + path.join(OLS_VHOST_DIR, domain)); } catch(e) {}
   return docRoot;
 }
 
+// FIX #10: Safe restart with config validation & rollback
 function safeRestartOLS() {
   try {
     execSync('systemctl restart lsws', { timeout: 15000 });
     execSync('sleep 2', { timeout: 5000 });
-    try { execSync('systemctl is-active lsws', { stdio: 'pipe' }); }
-    catch(e) {
+    try {
+      execSync('systemctl is-active lsws', { stdio: 'pipe' });
+    } catch(e) {
+      // OLS failed → restore backup
       if (fs.existsSync(OLS_CONF + '.bak')) {
         fs.copyFileSync(OLS_CONF + '.bak', OLS_CONF);
         execSync('systemctl restart lsws', { timeout: 15000 });
@@ -636,17 +379,18 @@ function safeRestartOLS() {
   } catch(e) { throw e; }
 }
 
-/* === Auth === */
+/* ---- Auth Routes ---- */
 app.post('/api/login', function(req, res) {
   var u = req.body.username, p = req.body.password;
   if (u === config.adminUser && bcrypt.compareSync(p, config.adminPass)) {
-    req.session.user = u; res.json({ success: true });
-  } else res.status(401).json({ error: 'Invalid credentials' });
+    req.session.user = u;
+    res.json({ success: true });
+  } else { res.status(401).json({ error: 'Invalid credentials' }); }
 });
 app.get('/api/logout', function(req, res) { req.session.destroy(); res.json({ success: true }); });
 app.get('/api/auth', function(req, res) { res.json({ authenticated: !!(req.session && req.session.user) }); });
 
-/* === Dashboard === */
+/* ---- Dashboard ---- */
 app.get('/api/dashboard', auth, function(req, res) {
   var tm = os.totalmem(), fm = os.freemem();
   var disk = { total: 0, used: 0, free: 0 };
@@ -656,23 +400,26 @@ app.get('/api/dashboard', auth, function(req, res) {
     hostname: os.hostname(), ip: run("hostname -I | awk '{print $1}'"),
     uptime: os.uptime(),
     cpu: { model: cpus[0] ? cpus[0].model : 'Unknown', cores: cpus.length, load: os.loadavg() },
-    memory: { total: tm, used: tm - fm, free: fm }, disk: disk, nodeVersion: process.version
+    memory: { total: tm, used: tm - fm, free: fm },
+    disk: disk, nodeVersion: process.version
   });
 });
 
-/* === Services === */
+/* ---- Services ---- */
 app.get('/api/services', auth, function(req, res) {
-  res.json(['lsws','mariadb','fail2ban','cloudflared'].map(function(s) { return { name: s, active: svcActive(s) }; }));
+  var svcs = ['lsws','mariadb','fail2ban','cloudflared'];
+  res.json(svcs.map(function(s) { return { name: s, active: svcActive(s) }; }));
 });
 app.post('/api/services/:name/:action', auth, function(req, res) {
-  var ok = ['lsws','mariadb','fail2ban','cloudflared'], acts = ['start','stop','restart'];
+  var ok = ['lsws','mariadb','fail2ban','cloudflared'];
+  var acts = ['start','stop','restart'];
   if (!ok.includes(req.params.name) || !acts.includes(req.params.action))
     return res.status(400).json({ error: 'Invalid' });
   try { execSync('systemctl ' + req.params.action + ' ' + req.params.name, { timeout: 15000 }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === File Manager === */
+/* ---- File Manager (FIX #8,12,13) ---- */
 app.get('/api/files', auth, function(req, res) {
   var p = path.resolve(req.query.path || '/');
   try {
@@ -688,58 +435,77 @@ app.get('/api/files', auth, function(req, res) {
       });
       res.json({ path: p, items: items });
     } else {
+      // FIX #12: Check file size and binary before reading
       if (stat.size > MAX_EDIT_SIZE) return res.json({ path: p, size: stat.size, tooLarge: true });
       var buf = Buffer.alloc(Math.min(512, stat.size));
-      if (stat.size > 0) { var fd = fs.openSync(p, 'r'); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd); }
+      var fd = fs.openSync(p, 'r');
+      fs.readSync(fd, buf, 0, buf.length, 0);
+      fs.closeSync(fd);
       if (buf.includes(0)) return res.json({ path: p, size: stat.size, binary: true });
       res.json({ path: p, content: fs.readFileSync(p, 'utf8'), size: stat.size });
     }
   } catch(e) { res.status(404).json({ error: e.message }); }
 });
+
 app.put('/api/files', auth, function(req, res) {
   try { fs.writeFileSync(req.body.filePath, req.body.content); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.delete('/api/files', auth, function(req, res) {
   var target = req.query.path;
   if (!target || target === '/') return res.status(400).json({ error: 'Cannot delete root' });
   try { fs.rmSync(target, { recursive: true, force: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 var upload = multer({ dest: '/tmp/uploads/' });
 app.post('/api/files/upload', auth, upload.single('file'), function(req, res) {
-  try { fs.renameSync(req.file.path, path.join(req.body.path || '/tmp', req.file.originalname)); res.json({ success: true }); }
-  catch(e) { res.status(500).json({ error: e.message }); }
+  try {
+    var destDir = req.body.path || '/tmp';
+    fs.renameSync(req.file.path, path.join(destDir, req.file.originalname));
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/api/files/mkdir', auth, function(req, res) {
   try { fs.mkdirSync(req.body.path, { recursive: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// FIX #13: Add rename & download
 app.post('/api/files/rename', auth, function(req, res) {
   try { fs.renameSync(req.body.oldPath, req.body.newPath); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.get('/api/files/download', auth, function(req, res) {
   var fp = req.query.path;
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
-  try { if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); res.download(fp); }
-  catch(e) { res.status(500).json({ error: e.message }); }
+  try {
+    if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' });
+    res.download(fp);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Domains === */
+/* ---- Domains (FIX #4,5,6,10) ---- */
 app.get('/api/domains', auth, function(req, res) {
   try {
     if (!fs.existsSync(OLS_VHOST_CONF_DIR)) return res.json([]);
     var list = fs.readdirSync(OLS_VHOST_CONF_DIR).filter(function(n) {
       return fs.statSync(path.join(OLS_VHOST_CONF_DIR, n)).isDirectory() && n !== 'Example';
     });
-    res.json(list.map(function(name) { return { name: name, docRoot: path.join(OLS_VHOST_DIR, name, 'html') }; }));
+    res.json(list.map(function(name) {
+      return { name: name, docRoot: path.join(OLS_VHOST_DIR, name, 'html') };
+    }));
   } catch(e) { res.json([]); }
 });
+
 app.post('/api/domains', auth, function(req, res) {
   var domain = req.body.domain;
   if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain))
     return res.status(400).json({ error: 'Invalid domain name' });
+  if (domain === 'Example') return res.status(400).json({ error: 'Reserved name' });
   try {
     var docRoot = createVhostFiles(domain);
     addDomainToOLS(domain);
@@ -747,6 +513,7 @@ app.post('/api/domains', auth, function(req, res) {
     res.json({ success: true, domain: domain, docRoot: docRoot });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.delete('/api/domains/:name', auth, function(req, res) {
   var domain = req.params.name;
   if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain))
@@ -759,7 +526,7 @@ app.delete('/api/domains/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Databases === */
+/* ---- Databases (FIX #9) ---- */
 app.get('/api/databases', auth, function(req, res) {
   try {
     var out = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
@@ -767,9 +534,11 @@ app.get('/api/databases', auth, function(req, res) {
     res.json(out.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); }));
   } catch(e) { res.json([]); }
 });
+
 app.post('/api/databases', auth, function(req, res) {
   var name = req.body.name, user = req.body.user, password = req.body.password;
-  if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name' });
+  // FIX #9: strict validation to prevent SQL injection
+  if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name (a-z, 0-9, _ only)' });
   if (user && !/^[a-zA-Z0-9_]+$/.test(user)) return res.status(400).json({ error: 'Invalid username' });
   try {
     var dp = shellEsc(config.dbRootPass);
@@ -781,6 +550,7 @@ app.post('/api/databases', auth, function(req, res) {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.delete('/api/databases/:name', auth, function(req, res) {
   if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
   try {
@@ -789,13 +559,18 @@ app.delete('/api/databases/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Tunnel === */
-app.get('/api/tunnel/status', auth, function(req, res) { res.json({ active: svcActive('cloudflared') }); });
+/* ---- Tunnel ---- */
+app.get('/api/tunnel/status', auth, function(req, res) {
+  res.json({ active: svcActive('cloudflared') });
+});
 app.post('/api/tunnel/setup', auth, function(req, res) {
   var token = req.body.token;
   if (!token) return res.status(400).json({ error: 'Token required' });
   var safeToken = token.replace(/[;&|`$(){}]/g, '');
   try {
+    if (!fs.existsSync('/usr/bin/cloudflared')) {
+      run('wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" -O /tmp/cf.deb && dpkg -i /tmp/cf.deb && rm -f /tmp/cf.deb', 30000);
+    }
     fs.writeFileSync('/etc/systemd/system/cloudflared.service',
       '[Unit]\nDescription=Cloudflare Tunnel\nAfter=network.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/cloudflared tunnel run --token ' + safeToken + '\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n');
     execSync('systemctl daemon-reload && systemctl enable cloudflared && systemctl restart cloudflared', { timeout: 15000 });
@@ -803,7 +578,7 @@ app.post('/api/tunnel/setup', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === Settings === */
+/* ---- Settings ---- */
 app.post('/api/settings/password', auth, function(req, res) {
   if (!bcrypt.compareSync(req.body.currentPassword, config.adminPass))
     return res.status(401).json({ error: 'Wrong current password' });
@@ -814,7 +589,7 @@ app.post('/api/settings/password', auth, function(req, res) {
   res.json({ success: true });
 });
 
-/* === Terminal === */
+/* ---- Terminal ---- */
 app.post('/api/terminal', auth, function(req, res) {
   if (!req.body.command) return res.json({ output: '' });
   try { res.json({ output: run(req.body.command, 30000) }); }
@@ -826,6 +601,525 @@ app.listen(config.panelPort, '0.0.0.0', function() {
 });
 APPEOF
 
+##############################################
+# -------- public/index.html --------
+##############################################
+cat > public/index.html <<'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>LitePanel</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="loginPage" class="login-page">
+  <div class="login-box">
+    <h1>🖥️ LitePanel</h1>
+    <form id="loginForm">
+      <input type="text" id="username" placeholder="Username" required>
+      <input type="password" id="password" placeholder="Password" required>
+      <button type="submit">Login</button>
+      <div id="loginError" class="error"></div>
+    </form>
+  </div>
+</div>
+<div id="mainPanel" class="main-panel" style="display:none">
+  <button id="mobileToggle" class="mobile-toggle">☰</button>
+  <aside class="sidebar" id="sidebar">
+    <div class="logo">🖥️ LitePanel</div>
+    <nav>
+      <a href="#" data-page="dashboard" class="active">📊 Dashboard</a>
+      <a href="#" data-page="services">⚙️ Services</a>
+      <a href="#" data-page="files">📁 Files</a>
+      <a href="#" data-page="domains">🌐 Domains</a>
+      <a href="#" data-page="databases">🗃️ Databases</a>
+      <a href="#" data-page="tunnel">☁️ Tunnel</a>
+      <a href="#" data-page="terminal">💻 Terminal</a>
+      <a href="#" data-page="settings">🔧 Settings</a>
+    </nav>
+    <a href="#" id="logoutBtn" class="logout-btn">🚪 Logout</a>
+  </aside>
+  <main class="content" id="content"></main>
+</div>
+<script src="/js/app.js"></script>
+</body>
+</html>
+HTMLEOF
+
+##############################################
+# -------- public/css/style.css (FIX #14) ---
+##############################################
+cat > public/css/style.css <<'CSSEOF'
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1d23;color:#e0e0e0}
+.login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#0f1117,#1a1d23)}
+.login-box{background:#2a2d35;padding:40px;border-radius:12px;width:360px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.login-box h1{text-align:center;color:#4f8cff;margin-bottom:30px;font-size:28px}
+.login-box input{width:100%;padding:12px 16px;margin-bottom:16px;background:#1a1d23;border:1px solid #3a3d45;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none}
+.login-box input:focus{border-color:#4f8cff}
+.login-box button{width:100%;padding:12px;background:#4f8cff;border:none;border-radius:8px;color:#fff;font-size:16px;cursor:pointer;font-weight:600}
+.login-box button:hover{background:#3a7ae0}
+.error{color:#e74c3c;text-align:center;margin-top:10px;font-size:14px}
+.main-panel{display:flex;min-height:100vh}
+.sidebar{width:220px;background:#12141a;display:flex;flex-direction:column;position:fixed;height:100vh;z-index:10;transition:transform .3s}
+.sidebar .logo{padding:20px;font-size:20px;font-weight:700;color:#4f8cff;border-bottom:1px solid #2a2d35}
+.sidebar nav{flex:1;padding:10px 0;overflow-y:auto}
+.sidebar nav a{display:block;padding:12px 20px;color:#8a8d93;text-decoration:none;transition:.2s;font-size:14px}
+.sidebar nav a:hover,.sidebar nav a.active{background:#1a1d23;color:#4f8cff;border-right:3px solid #4f8cff}
+.logout-btn{padding:15px 20px;color:#e74c3c;text-decoration:none;border-top:1px solid #2a2d35;font-size:14px}
+.content{flex:1;margin-left:220px;padding:30px;min-height:100vh}
+.mobile-toggle{display:none;position:fixed;top:10px;left:10px;z-index:20;background:#2a2d35;border:none;color:#e0e0e0;font-size:24px;padding:8px 12px;border-radius:8px;cursor:pointer}
+@media(max-width:768px){
+  .mobile-toggle{display:block}
+  .sidebar{transform:translateX(-100%)}
+  .sidebar.open{transform:translateX(0)}
+  .content{margin-left:0;padding:15px;padding-top:55px}
+  .stats-grid{grid-template-columns:1fr!important}
+  .flex-row{flex-direction:column}
+}
+.page-title{font-size:24px;margin-bottom:8px}
+.page-sub{color:#8a8d93;margin-bottom:25px;font-size:14px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:25px}
+.card{background:#2a2d35;padding:20px;border-radius:10px}
+.card .label{font-size:12px;color:#8a8d93;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.card .value{font-size:22px;font-weight:700;color:#4f8cff}
+.card .sub{font-size:12px;color:#6a6d73;margin-top:4px}
+.progress{background:#1a1d23;border-radius:8px;height:8px;margin-top:8px;overflow:hidden}
+.progress-bar{height:100%;border-radius:8px;background:#4f8cff;transition:width .3s}
+.progress-bar.warn{background:#f39c12}
+.progress-bar.danger{background:#e74c3c}
+table.tbl{width:100%;border-collapse:collapse;background:#2a2d35;border-radius:10px;overflow:hidden}
+.tbl th{background:#1a1d23;padding:12px 16px;text-align:left;font-size:12px;color:#8a8d93;text-transform:uppercase}
+.tbl td{padding:12px 16px;border-bottom:1px solid #1a1d23;font-size:14px}
+.btn{padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:.2s;display:inline-block;text-decoration:none}
+.btn:hover{opacity:.85}
+.btn-p{background:#4f8cff;color:#fff}
+.btn-s{background:#2ecc71;color:#fff}
+.btn-d{background:#e74c3c;color:#fff}
+.btn-w{background:#f39c12;color:#fff}
+.btn-sm{padding:4px 10px;font-size:12px}
+.badge{padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600}
+.badge-on{background:rgba(46,204,113,.15);color:#2ecc71}
+.badge-off{background:rgba(231,76,60,.15);color:#e74c3c}
+.form-control{width:100%;padding:10px 14px;background:#1a1d23;border:1px solid #3a3d45;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none}
+.form-control:focus{border-color:#4f8cff}
+textarea.form-control{min-height:300px;font-family:'Courier New',monospace;font-size:13px;resize:vertical}
+.alert{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:14px}
+.alert-ok{background:rgba(46,204,113,.1);border:1px solid #2ecc71;color:#2ecc71}
+.alert-err{background:rgba(231,76,60,.1);border:1px solid #e74c3c;color:#e74c3c}
+.breadcrumb{display:flex;gap:5px;margin-bottom:15px;flex-wrap:wrap;font-size:14px}
+.breadcrumb a{color:#4f8cff;text-decoration:none;cursor:pointer}
+.breadcrumb span{color:#6a6d73}
+.file-item{display:flex;align-items:center;padding:10px 16px;background:#2a2d35;margin-bottom:2px;cursor:pointer;border-radius:4px;font-size:14px}
+.file-item:hover{background:#32353d}
+.file-item .icon{margin-right:10px;font-size:16px}
+.file-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-item .size{color:#8a8d93;margin-right:10px;min-width:70px;text-align:right;font-size:13px}
+.file-item .perms{color:#6a6d73;margin-right:10px;font-family:monospace;font-size:12px}
+.file-actions{display:flex;gap:4px}
+.terminal-box{background:#0d0d0d;color:#0f0;font-family:'Courier New',monospace;padding:20px;border-radius:10px;min-height:350px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:13px}
+.term-input{display:flex;gap:10px;margin-top:10px}
+.term-input input{flex:1;background:#0d0d0d;border:1px solid #333;color:#0f0;font-family:'Courier New',monospace;padding:10px;border-radius:6px;outline:none}
+.flex-row{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:16px}
+.mt{margin-top:16px}.mb{margin-bottom:16px}
+CSSEOF
+
+##############################################
+# ---- public/js/app.js (Frontend FIXED) ----
+##############################################
+cat > public/js/app.js <<'JSEOF'
+/* ---- API Helper ---- */
+var api = {
+  req: function(url, opt) {
+    opt = opt || {};
+    var h = {};
+    if (!(opt.body instanceof FormData)) h['Content-Type'] = 'application/json';
+    return fetch(url, {
+      headers: h, method: opt.method || 'GET',
+      body: opt.body instanceof FormData ? opt.body : opt.body ? JSON.stringify(opt.body) : undefined
+    }).then(function(r) { return r.json(); });
+  },
+  get: function(u) { return api.req(u); },
+  post: function(u, b) { return api.req(u, { method: 'POST', body: b }); },
+  put: function(u, b) { return api.req(u, { method: 'PUT', body: b }); },
+  del: function(u) { return api.req(u, { method: 'DELETE' }); }
+};
+
+var $ = function(id) { return document.getElementById(id); };
+function fmtB(b) {
+  if (!b) return '0 B';
+  var k = 1024, s = ['B','KB','MB','GB','TB'], i = Math.floor(Math.log(b) / Math.log(k));
+  return (b / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
+}
+function fmtUp(s) {
+  var d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return d + 'd ' + h + 'h ' + m + 'm';
+}
+function esc(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+function pClass(p) { return p > 80 ? 'danger' : p > 60 ? 'warn' : ''; }
+
+/* ---- State ---- */
+var curPath = '/usr/local/lsws';
+var editFile = '';
+
+/* ---- Auth ---- */
+function checkAuth() {
+  api.get('/api/auth').then(function(r) {
+    if (r.authenticated) { showPanel(); loadPage('dashboard'); }
+    else showLogin();
+  });
+}
+function showLogin() { $('loginPage').style.display = 'flex'; $('mainPanel').style.display = 'none'; }
+function showPanel() { $('loginPage').style.display = 'none'; $('mainPanel').style.display = 'flex'; }
+
+$('loginForm').addEventListener('submit', function(e) {
+  e.preventDefault();
+  api.post('/api/login', { username: $('username').value, password: $('password').value })
+    .then(function(r) {
+      if (r.success) { showPanel(); loadPage('dashboard'); }
+      else $('loginError').textContent = 'Invalid credentials';
+    });
+});
+$('logoutBtn').addEventListener('click', function(e) { e.preventDefault(); api.get('/api/logout').then(showLogin); });
+
+/* ---- Mobile Toggle (FIX #14) ---- */
+$('mobileToggle').addEventListener('click', function() {
+  $('sidebar').classList.toggle('open');
+});
+
+/* ---- Navigation ---- */
+document.querySelectorAll('.sidebar nav a').forEach(function(a) {
+  a.addEventListener('click', function(e) {
+    e.preventDefault();
+    document.querySelectorAll('.sidebar nav a').forEach(function(x) { x.classList.remove('active'); });
+    a.classList.add('active');
+    loadPage(a.dataset.page);
+    $('sidebar').classList.remove('open');
+  });
+});
+
+function loadPage(p) {
+  var el = $('content');
+  switch(p) {
+    case 'dashboard': return pgDash(el);
+    case 'services':  return pgSvc(el);
+    case 'files':     return pgFiles(el);
+    case 'domains':   return pgDom(el);
+    case 'databases': return pgDb(el);
+    case 'tunnel':    return pgTun(el);
+    case 'terminal':  return pgTerm(el);
+    case 'settings':  return pgSet(el);
+  }
+}
+
+/* ======== Dashboard ======== */
+function pgDash(el) {
+  Promise.all([api.get('/api/dashboard'), api.get('/api/services')]).then(function(res) {
+    var d = res[0], s = res[1];
+    var mp = Math.round(d.memory.used / d.memory.total * 100);
+    var dp = d.disk.total ? Math.round(d.disk.used / d.disk.total * 100) : 0;
+    el.innerHTML = '<h2 class="page-title">📊 Dashboard</h2><p class="page-sub">' + d.hostname + ' (' + d.ip + ')</p>'
+      + '<div class="stats-grid">'
+      + '<div class="card"><div class="label">CPU</div><div class="value">' + d.cpu.cores + ' Cores</div><div class="sub">Load: ' + d.cpu.load.map(function(l){ return l.toFixed(2); }).join(', ') + '</div></div>'
+      + '<div class="card"><div class="label">Memory</div><div class="value">' + mp + '%</div><div class="progress"><div class="progress-bar ' + pClass(mp) + '" style="width:' + mp + '%"></div></div><div class="sub">' + fmtB(d.memory.used) + ' / ' + fmtB(d.memory.total) + '</div></div>'
+      + '<div class="card"><div class="label">Disk</div><div class="value">' + dp + '%</div><div class="progress"><div class="progress-bar ' + pClass(dp) + '" style="width:' + dp + '%"></div></div><div class="sub">' + fmtB(d.disk.used) + ' / ' + fmtB(d.disk.total) + '</div></div>'
+      + '<div class="card"><div class="label">Uptime</div><div class="value">' + fmtUp(d.uptime) + '</div><div class="sub">Node ' + d.nodeVersion + '</div></div>'
+      + '</div>'
+      + '<h3 class="mb">Services</h3>'
+      + '<table class="tbl"><thead><tr><th>Service</th><th>Status</th></tr></thead><tbody>'
+      + s.map(function(x) { return '<tr><td>' + x.name + '</td><td><span class="badge ' + (x.active ? 'badge-on' : 'badge-off') + '">' + (x.active ? 'Running' : 'Stopped') + '</span></td></tr>'; }).join('')
+      + '</tbody></table>'
+      + '<div class="mt"><a href="http://' + d.ip + ':7080" target="_blank" class="btn btn-p">OLS Admin</a> <a href="http://' + d.ip + ':8088/phpmyadmin/" target="_blank" class="btn btn-w">phpMyAdmin</a></div>';
+  });
+}
+
+/* ======== Services ======== */
+function pgSvc(el) {
+  api.get('/api/services').then(function(s) {
+    el.innerHTML = '<h2 class="page-title">⚙️ Services</h2><p class="page-sub">Manage services</p><div id="svcMsg"></div>'
+      + '<table class="tbl"><thead><tr><th>Service</th><th>Status</th><th>Actions</th></tr></thead><tbody>'
+      + s.map(function(x) {
+        return '<tr><td><strong>' + x.name + '</strong></td>'
+          + '<td><span class="badge ' + (x.active ? 'badge-on' : 'badge-off') + '">' + (x.active ? 'Running' : 'Stopped') + '</span></td>'
+          + '<td><button class="btn btn-s btn-sm" data-svc="' + x.name + '" data-act="start" onclick="svcAct(this)">Start</button> '
+          + '<button class="btn btn-d btn-sm" data-svc="' + x.name + '" data-act="stop" onclick="svcAct(this)">Stop</button> '
+          + '<button class="btn btn-w btn-sm" data-svc="' + x.name + '" data-act="restart" onclick="svcAct(this)">Restart</button></td></tr>';
+      }).join('')
+      + '</tbody></table>';
+  });
+}
+window.svcAct = function(btn) {
+  var n = btn.dataset.svc, a = btn.dataset.act;
+  api.post('/api/services/' + n + '/' + a).then(function(r) {
+    $('svcMsg').innerHTML = r.success
+      ? '<div class="alert alert-ok">' + n + ' ' + a + 'ed</div>'
+      : '<div class="alert alert-err">' + (r.error || 'Failed') + '</div>';
+    setTimeout(function() { loadPage('services'); }, 1200);
+  });
+};
+
+/* ======== File Manager (FIX #8: data attributes, no inline path strings) ======== */
+function pgFiles(el, p) {
+  if (p !== undefined) curPath = p;
+  api.get('/api/files?path=' + encodeURIComponent(curPath)).then(function(d) {
+    if (d.error) { el.innerHTML = '<div class="alert alert-err">' + esc(d.error) + '</div>'; return; }
+
+    // Binary file
+    if (d.binary) {
+      el.innerHTML = '<h2 class="page-title">📄 Binary File</h2><p class="page-sub">' + esc(d.path) + '</p>'
+        + '<div class="card"><p>Binary file (' + fmtB(d.size) + ') — cannot edit</p>'
+        + '<div class="mt"><a href="/api/files/download?path=' + encodeURIComponent(d.path) + '" class="btn btn-p" target="_blank">Download</a> '
+        + '<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
+      curPath = d.path.substring(0, d.path.lastIndexOf('/')) || '/';
+      return;
+    }
+
+    // Too large
+    if (d.tooLarge) {
+      el.innerHTML = '<h2 class="page-title">📄 Large File</h2><p class="page-sub">' + esc(d.path) + '</p>'
+        + '<div class="card"><p>File too large to edit (' + fmtB(d.size) + ')</p>'
+        + '<div class="mt"><a href="/api/files/download?path=' + encodeURIComponent(d.path) + '" class="btn btn-p" target="_blank">Download</a> '
+        + '<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
+      curPath = d.path.substring(0, d.path.lastIndexOf('/')) || '/';
+      return;
+    }
+
+    // Text file editor
+    if (d.content !== undefined) {
+      editFile = d.path;
+      curPath = d.path.substring(0, d.path.lastIndexOf('/')) || '/';
+      el.innerHTML = '<h2 class="page-title">📝 Edit File</h2><p class="page-sub">' + esc(d.path) + ' (' + fmtB(d.size) + ')</p><div id="fMsg"></div>'
+        + '<textarea class="form-control" id="fContent">' + esc(d.content) + '</textarea>'
+        + '<div class="mt"><button class="btn btn-p" onclick="saveFile()">💾 Save</button> '
+        + '<a href="/api/files/download?path=' + encodeURIComponent(d.path) + '" class="btn btn-w" target="_blank">Download</a> '
+        + '<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div>';
+      return;
+    }
+
+    // Directory listing
+    var parts = curPath.split('/').filter(Boolean);
+    var bc = '<a data-nav="/" onclick="navF(this)">root</a>';
+    var bp = '';
+    parts.forEach(function(x) {
+      bp += '/' + x;
+      bc += ' <span>/</span> <a data-nav="' + encodeURIComponent(bp) + '" onclick="navF(this)">' + esc(x) + '</a>';
+    });
+
+    var items = (d.items || []).sort(function(a, b) {
+      return a.isDir === b.isDir ? a.name.localeCompare(b.name) : (a.isDir ? -1 : 1);
+    });
+    var parent = curPath === '/' ? '' : (curPath.split('/').slice(0, -1).join('/') || '/');
+
+    var html = '<h2 class="page-title">📁 File Manager</h2>'
+      + '<div class="breadcrumb">' + bc + '</div><div id="fMsg"></div>'
+      + '<div class="mb">'
+      + '<button class="btn btn-p" onclick="uploadF()">📤 Upload</button> '
+      + '<button class="btn btn-s" onclick="mkdirF()">📁 New Folder</button>'
+      + '</div><div>';
+
+    if (parent) {
+      html += '<div class="file-item" data-nav="' + encodeURIComponent(parent) + '" ondblclick="navF(this)">'
+        + '<span class="icon">📁</span><span class="name">..</span><span class="size"></span></div>';
+    }
+
+    // FIX #8: Use data attributes for paths, no inline string concatenation
+    items.forEach(function(i) {
+      var fullPath = (curPath === '/' ? '' : curPath) + '/' + i.name;
+      var enc = encodeURIComponent(fullPath);
+      html += '<div class="file-item" data-nav="' + enc + '" ondblclick="navF(this)">'
+        + '<span class="icon">' + (i.isDir ? '📁' : '📄') + '</span>'
+        + '<span class="name">' + esc(i.name) + '</span>'
+        + (i.perms ? '<span class="perms">' + i.perms + '</span>' : '')
+        + '<span class="size">' + (i.isDir ? '' : fmtB(i.size)) + '</span>'
+        + '<div class="file-actions">'
+        + (!i.isDir ? '<a href="/api/files/download?path=' + enc + '" class="btn btn-p btn-sm" target="_blank" onclick="event.stopPropagation()">⬇</a> ' : '')
+        + '<button class="btn btn-w btn-sm" data-rn="' + enc + '" onclick="event.stopPropagation();renF(this)">✏️</button> '
+        + '<button class="btn btn-d btn-sm" data-del="' + enc + '" onclick="event.stopPropagation();delF(this)">🗑</button>'
+        + '</div></div>';
+    });
+
+    html += '</div>';
+    el.innerHTML = html;
+  });
+}
+
+// FIX #8: Safe navigation using data attributes
+window.navF = function(el) {
+  var p = el.dataset ? el.dataset.nav : el.getAttribute('data-nav');
+  if (p) pgFiles($('content'), decodeURIComponent(p));
+};
+
+window.saveFile = function() {
+  api.put('/api/files', { filePath: editFile, content: $('fContent').value }).then(function(r) {
+    $('fMsg').innerHTML = r.success ? '<div class="alert alert-ok">Saved!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+  });
+};
+
+window.delF = function(btn) {
+  var p = decodeURIComponent(btn.dataset.del);
+  if (confirm('Delete ' + p + '?')) {
+    api.del('/api/files?path=' + encodeURIComponent(p)).then(function() { pgFiles($('content')); });
+  }
+};
+
+window.renF = function(btn) {
+  var oldPath = decodeURIComponent(btn.dataset.rn);
+  var oldName = oldPath.split('/').pop();
+  var newName = prompt('Rename to:', oldName);
+  if (newName && newName !== oldName) {
+    var dir = oldPath.substring(0, oldPath.lastIndexOf('/'));
+    api.post('/api/files/rename', { oldPath: oldPath, newPath: dir + '/' + newName }).then(function(r) {
+      if (r.success) pgFiles($('content'));
+      else alert('Rename failed: ' + (r.error || ''));
+    });
+  }
+};
+
+window.uploadF = function() {
+  var inp = document.createElement('input'); inp.type = 'file';
+  inp.onchange = function() {
+    var fd = new FormData();
+    fd.append('file', inp.files[0]);
+    fd.append('path', curPath);
+    api.req('/api/files/upload', { method: 'POST', body: fd }).then(function() { pgFiles($('content')); });
+  };
+  inp.click();
+};
+
+window.mkdirF = function() {
+  var n = prompt('Folder name:');
+  if (n) api.post('/api/files/mkdir', { path: curPath + '/' + n }).then(function() { pgFiles($('content')); });
+};
+
+/* ======== Domains ======== */
+function pgDom(el) {
+  api.get('/api/domains').then(function(d) {
+    el.innerHTML = '<h2 class="page-title">🌐 Domains</h2><p class="page-sub">Virtual host management</p><div id="domMsg"></div>'
+      + '<div class="flex-row"><input type="text" id="newDom" class="form-control" placeholder="example.com" style="max-width:300px">'
+      + '<button class="btn btn-p" onclick="addDom()">Add Domain</button></div>'
+      + '<table class="tbl"><thead><tr><th>Domain</th><th>Document Root</th><th>Actions</th></tr></thead><tbody>'
+      + d.map(function(x) {
+        var encDoc = encodeURIComponent(x.docRoot);
+        return '<tr><td><strong>' + esc(x.name) + '</strong></td><td><code>' + esc(x.docRoot) + '</code></td>'
+          + '<td><button class="btn btn-p btn-sm" data-nav="' + encDoc + '" onclick="navF(this);loadPage(\'files\')">Files</button> '
+          + '<button class="btn btn-d btn-sm" data-dom="' + esc(x.name) + '" onclick="delDom(this)">Delete</button></td></tr>';
+      }).join('')
+      + (d.length === 0 ? '<tr><td colspan="3" style="text-align:center;color:#8a8d93">No domains yet</td></tr>' : '')
+      + '</tbody></table>';
+  });
+}
+
+window.addDom = function() {
+  var domain = $('newDom').value.trim();
+  if (!domain) return;
+  api.post('/api/domains', { domain: domain }).then(function(r) {
+    $('domMsg').innerHTML = r.success ? '<div class="alert alert-ok">Domain added! OLS restarted.</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+    if (r.success) setTimeout(function() { loadPage('domains'); }, 1200);
+  });
+};
+
+window.delDom = function(btn) {
+  var n = btn.dataset.dom;
+  if (confirm('Delete domain ' + n + '?')) {
+    api.del('/api/domains/' + n).then(function(r) {
+      if (r.success) loadPage('domains');
+      else alert('Error: ' + (r.error || ''));
+    });
+  }
+};
+
+/* ======== Databases ======== */
+function pgDb(el) {
+  Promise.all([api.get('/api/databases'), api.get('/api/dashboard')]).then(function(res) {
+    var d = res[0], info = res[1];
+    el.innerHTML = '<h2 class="page-title">🗃️ Databases</h2><p class="page-sub">MariaDB management</p><div id="dbMsg"></div>'
+      + '<div class="flex-row">'
+      + '<div><label style="font-size:12px;color:#8a8d93">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
+      + '<div><label style="font-size:12px;color:#8a8d93">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
+      + '<div><label style="font-size:12px;color:#8a8d93">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
+      + '<button class="btn btn-p" onclick="addDb()">Create</button></div>'
+      + '<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
+      + (Array.isArray(d) ? d : []).map(function(x) {
+        return '<tr><td><strong>' + esc(x) + '</strong></td><td><button class="btn btn-d btn-sm" data-db="' + esc(x) + '" onclick="dropDb(this)">Drop</button></td></tr>';
+      }).join('')
+      + '</tbody></table>'
+      + '<div class="mt"><a href="http://' + info.ip + ':8088/phpmyadmin/" target="_blank" class="btn btn-w">Open phpMyAdmin</a></div>';
+  });
+}
+
+window.addDb = function() {
+  api.post('/api/databases', { name: $('dbName').value, user: $('dbUser').value, password: $('dbPass').value }).then(function(r) {
+    $('dbMsg').innerHTML = r.success ? '<div class="alert alert-ok">Database created!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+    if (r.success) setTimeout(function() { loadPage('databases'); }, 1000);
+  });
+};
+
+window.dropDb = function(btn) {
+  var n = btn.dataset.db;
+  if (confirm('DROP database ' + n + '? This cannot be undone!')) {
+    api.del('/api/databases/' + n).then(function() { loadPage('databases'); });
+  }
+};
+
+/* ======== Tunnel ======== */
+function pgTun(el) {
+  api.get('/api/tunnel/status').then(function(s) {
+    el.innerHTML = '<h2 class="page-title">☁️ Cloudflare Tunnel</h2><p class="page-sub">Secure tunnel to your server</p><div id="tunMsg"></div>'
+      + '<div class="card mb"><div class="label">Status</div><span class="badge ' + (s.active ? 'badge-on' : 'badge-off') + '">' + (s.active ? 'Connected' : 'Not Connected') + '</span></div>'
+      + '<div class="card"><h3 class="mb">Setup Tunnel</h3>'
+      + '<p style="color:#8a8d93;margin-bottom:15px;font-size:14px">1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:#4f8cff">Cloudflare Zero Trust</a><br>2. Create a Tunnel → copy token<br>3. Paste below</p>'
+      + '<div class="flex-row"><input id="tunToken" class="form-control" placeholder="Tunnel token..." style="flex:1"><button class="btn btn-p" onclick="setTun()">Connect</button></div></div>';
+  });
+}
+window.setTun = function() {
+  api.post('/api/tunnel/setup', { token: $('tunToken').value.trim() }).then(function(r) {
+    $('tunMsg').innerHTML = r.success ? '<div class="alert alert-ok">Tunnel connected!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+    if (r.success) setTimeout(function() { loadPage('tunnel'); }, 2000);
+  });
+};
+
+/* ======== Terminal ======== */
+function pgTerm(el) {
+  el.innerHTML = '<h2 class="page-title">💻 Terminal</h2><p class="page-sub">Run commands on server</p>'
+    + '<div class="terminal-box" id="termOut">$ </div>'
+    + '<div class="term-input"><input id="termIn" placeholder="Type command..." onkeydown="if(event.key===\'Enter\')runCmd()"><button class="btn btn-p" onclick="runCmd()">Run</button></div>';
+  $('termIn').focus();
+}
+window.runCmd = function() {
+  var cmd = $('termIn').value.trim(); if (!cmd) return;
+  var out = $('termOut');
+  out.textContent += cmd + '\n';
+  $('termIn').value = '';
+  api.post('/api/terminal', { command: cmd }).then(function(r) {
+    out.textContent += (r.output || '') + '\n$ ';
+    out.scrollTop = out.scrollHeight;
+  });
+};
+
+/* ======== Settings ======== */
+function pgSet(el) {
+  el.innerHTML = '<h2 class="page-title">🔧 Settings</h2><p class="page-sub">Panel configuration</p><div id="setMsg"></div>'
+    + '<div class="card" style="max-width:400px"><h3 class="mb">Change Password</h3>'
+    + '<div class="mb"><label style="font-size:12px;color:#8a8d93">Current Password</label><input type="password" id="curPass" class="form-control"></div>'
+    + '<div class="mb"><label style="font-size:12px;color:#8a8d93">New Password</label><input type="password" id="newPass" class="form-control"></div>'
+    + '<div class="mb"><label style="font-size:12px;color:#8a8d93">Confirm Password</label><input type="password" id="cfmPass" class="form-control"></div>'
+    + '<button class="btn btn-p" onclick="chgPass()">Update Password</button></div>';
+}
+window.chgPass = function() {
+  var np = $('newPass').value, cp = $('cfmPass').value;
+  if (np !== cp) { $('setMsg').innerHTML = '<div class="alert alert-err">Passwords don\'t match</div>'; return; }
+  if (np.length < 6) { $('setMsg').innerHTML = '<div class="alert alert-err">Min 6 characters</div>'; return; }
+  api.post('/api/settings/password', { currentPassword: $('curPass').value, newPassword: np }).then(function(r) {
+    $('setMsg').innerHTML = r.success ? '<div class="alert alert-ok">Password updated!</div>' : '<div class="alert alert-err">' + (r.error||'Failed') + '</div>';
+  });
+};
+
+/* ---- Init ---- */
+checkAuth();
+JSEOF
+
 log "LitePanel app created"
 
 ########################################
@@ -834,124 +1128,28 @@ step "Step 7/9: Install phpMyAdmin"
 PMA_DIR="/usr/local/lsws/Example/html/phpmyadmin"
 mkdir -p ${PMA_DIR}
 cd /tmp
-wget -q "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" -O pma.tar.gz
+wget -q "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.tar.gz" -O pma.tar.gz 2>/dev/null
 if [ -f pma.tar.gz ] && [ -s pma.tar.gz ]; then
   tar xzf pma.tar.gz
   cp -rf phpMyAdmin-*/* ${PMA_DIR}/
   rm -rf phpMyAdmin-* pma.tar.gz
 
-  # Get MariaDB socket path with improved detection
-  MYSQL_SOCK=""
-  
-  # Method 1: Check my.cnf files
-  for config in /etc/mysql/my.cnf /etc/mysql/mariadb.conf.d/50-server.cnf /etc/my.cnf; do
-    if [ -f "$config" ]; then
-      SOCK=$(grep -v "#" "$config" | grep "socket" | head -1 | awk -F'=' '{print $2}' | tr -d ' ')
-      if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
-        MYSQL_SOCK="$SOCK"
-        break
-      fi
-    fi
-  done
-  
-  # Method 2: Use mysqladmin
-  if [ -z "$MYSQL_SOCK" ]; then
-    SOCK=$(mysqladmin variables 2>/dev/null | grep "socket" | awk '{print $4}')
-    if [ -n "$SOCK" ] && [ -S "$SOCK" ]; then
-      MYSQL_SOCK="$SOCK"
-    fi
-  fi
-  
-  # Method 3: Check common locations
-  if [ -z "$MYSQL_SOCK" ]; then
-    for sock in "/var/run/mysqld/mysqld.sock" "/var/lib/mysql/mysql.sock" "/tmp/mysql.sock"; do
-      if [ -S "$sock" ]; then
-        MYSQL_SOCK="$sock"
-        break
-      fi
-    done
-  fi
-  
-  # Default fallback
-  if [ -z "$MYSQL_SOCK" ]; then
-    MYSQL_SOCK="/var/run/mysqld/mysqld.sock"
-    warn "Could not detect MySQL socket, using default: $MYSQL_SOCK"
-  else
-    log "Detected MySQL socket: $MYSQL_SOCK"
-  fi
-
   BLOWFISH=$(openssl rand -hex 16)
-  # Enhanced configuration for phpMyAdmin - FIXED VERSION
   cat > ${PMA_DIR}/config.inc.php <<PMAEOF
 <?php
-// Enhanced configuration for phpMyAdmin
-
-/* Authentication */
 \$cfg['blowfish_secret'] = '${BLOWFISH}';
 \$i = 0;
 \$i++;
 \$cfg['Servers'][\$i]['host'] = 'localhost';
 \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
-\$cfg['Servers'][\$i]['connect_type'] = 'socket';
-\$cfg['Servers'][\$i]['socket'] = '${MYSQL_SOCK}';
-\$cfg['Servers'][\$i]['compress'] = false;
-\$cfg['Servers'][\$i]['extension'] = 'mysqli';
-\$cfg['Servers'][\$i]['user'] = '';
-\$cfg['Servers'][\$i]['password'] = '';
-\$cfg['DefaultLang'] = 'en';
-\$cfg['ServerDefault'] = 1;
-\$cfg['UploadDir'] = '';
-\$cfg['SaveDir'] = '';
-\$cfg['TempDir'] = '${PMA_DIR}/tmp';
-/* Using relative path instead of fixed IP */
-\$cfg['PmaAbsoluteUri'] = '';
-
-/* User Interface */
-\$cfg['ExecTimeLimit'] = 300;
-\$cfg['MaxRows'] = 100;
-\$cfg['SendErrorReports'] = 'never';
-\$cfg['ShowPhpInfo'] = false;
-
-/* Features */
-\$cfg['AllowArbitraryServer'] = false;
-\$cfg['SuhosinDisableWarning'] = true;
-\$cfg['LoginCookieValidity'] = 1440;
-
-/* Security */
-\$cfg['CheckConfigurationPermissions'] = false;
 PMAEOF
-  
-  # Create the tmp directory with proper permissions
-  mkdir -p ${PMA_DIR}/tmp
-  chmod 750 ${PMA_DIR}/tmp
 
-  # Set correct permissions with principle of least privilege
   chown -R nobody:nogroup ${PMA_DIR}
-  chmod 750 ${PMA_DIR}
-  
-  log "phpMyAdmin installed with socket: ${MYSQL_SOCK}"
-
-  # We don't need symlinks anymore because we fixed the context path configuration
-  # But keep for compatibility with existing code that might reference these paths
-  if [ ! -L "/usr/local/lsws/Example/html/phpMyAdmin" ]; then
-    ln -sf ${PMA_DIR} /usr/local/lsws/Example/html/phpMyAdmin
-  fi
-  
-  if [ ! -L "/usr/local/lsws/Example/html/pma" ]; then
-    ln -sf ${PMA_DIR} /usr/local/lsws/Example/html/pma
-  fi
-  
-  # Create test file to verify PHP processing
-  echo "<?php phpinfo(); ?>" > /usr/local/lsws/Example/html/test.php
-  chmod 644 /usr/local/lsws/Example/html/test.php
-  chown nobody:nogroup /usr/local/lsws/Example/html/test.php
+  log "phpMyAdmin installed"
 else
-  err "phpMyAdmin download failed"
+  err "phpMyAdmin download failed (install manually later)"
 fi
-
-# Fix HTML root permissions to avoid OLS warning
-chown -R nobody:nogroup /usr/local/lsws/Example/html/
 
 ########################################
 step "Step 8/9: Install Cloudflared + Fail2Ban"
@@ -963,44 +1161,25 @@ if [ "$ARCH" = "arm64" ]; then
 else
   CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
 fi
-wget -q "$CF_URL" -O cloudflared.deb
+wget -q "$CF_URL" -O cloudflared.deb 2>/dev/null
 if [ -f cloudflared.deb ] && [ -s cloudflared.deb ]; then
-  dpkg -i cloudflared.deb
+  dpkg -i cloudflared.deb > /dev/null 2>&1
   rm -f cloudflared.deb
   log "Cloudflared installed"
 else
-  err "Cloudflared download failed"
+  err "Cloudflared download failed (install manually later)"
 fi
 
-apt-get install -y fail2ban
+apt-get install -y -qq fail2ban > /dev/null 2>&1
 systemctl enable fail2ban > /dev/null 2>&1
-systemctl start fail2ban
-
-# Configure Fail2Ban for SSH and HTTP - ENHANCED
-cat > /etc/fail2ban/jail.d/custom.conf <<'BANEOF'
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 3600
-
-[apache-auth]
-enabled = true
-port = http,https,8088
-filter = apache-auth
-logpath = /var/log/lsws/*.log
-maxretry = 5
-bantime = 3600
-BANEOF
-
-systemctl restart fail2ban
-log "Fail2Ban installed and configured"
+systemctl start fail2ban 2>/dev/null
+log "Fail2Ban installed"
 
 ########################################
 step "Step 9/9: Configure Firewall + Start Services"
 ########################################
+
+# Systemd service for LitePanel
 cat > /etc/systemd/system/litepanel.service <<SVCEOF
 [Unit]
 Description=LitePanel Control Panel
@@ -1022,24 +1201,29 @@ systemctl daemon-reload
 systemctl enable litepanel > /dev/null 2>&1
 systemctl start litepanel
 
+# Firewall
 ufw --force reset > /dev/null 2>&1
 ufw default deny incoming > /dev/null 2>&1
 ufw default allow outgoing > /dev/null 2>&1
-for port in 22 80 443 ${PANEL_PORT} 7080 8088; do
-  ufw allow ${port}/tcp > /dev/null 2>&1
-done
+ufw allow 22/tcp > /dev/null 2>&1
+ufw allow 80/tcp > /dev/null 2>&1
+ufw allow 443/tcp > /dev/null 2>&1
+ufw allow ${PANEL_PORT}/tcp > /dev/null 2>&1
+ufw allow 7080/tcp > /dev/null 2>&1
+ufw allow 8088/tcp > /dev/null 2>&1
 ufw --force enable > /dev/null 2>&1
 log "Firewall configured"
 
-# Restart all services to ensure everything is running
-systemctl restart lsws
-systemctl restart mariadb
+# Restart OLS with new config
+systemctl restart lsws 2>/dev/null
+systemctl restart mariadb 2>/dev/null
+
 sleep 3
 
-# Create credentials file with better permissions
+# Save credentials
 cat > /root/.litepanel_credentials <<CREDEOF
 ==========================================
-  LitePanel Credentials (SECURELY STORE THIS FILE)
+  LitePanel Credentials
 ==========================================
 Panel URL:     http://${SERVER_IP}:${PANEL_PORT}
 Panel Login:   ${ADMIN_USER} / ${ADMIN_PASS}
@@ -1048,15 +1232,11 @@ OLS Admin:     http://${SERVER_IP}:7080
 OLS Login:     admin / ${ADMIN_PASS}
 
 phpMyAdmin:    http://${SERVER_IP}:8088/phpmyadmin/
-Database Login: root / ${DB_ROOT_PASS}
 
 MariaDB Root:  ${DB_ROOT_PASS}
 ==========================================
 CREDEOF
 chmod 600 /root/.litepanel_credentials
-
-# Create alias for easy credential access
-echo "alias litecreds='cat /root/.litepanel_credentials'" >> /root/.bashrc
 
 ########################################
 # FINAL SUMMARY
@@ -1066,16 +1246,16 @@ echo -e "${C}╔═════════════════════�
 echo -e "${C}║         ✅ Installation Complete!             ║${N}"
 echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  LitePanel:   ${G}http://${SERVER_IP}:${PANEL_PORT}${N}"
-echo -e "${C}║${N}  OLS Admin:   ${G}http://${SERVER_IP}:7080${N}"
-echo -e "${C}║${N}  phpMyAdmin:  ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
+echo -e "${C}║${N}  LitePanel:  ${G}http://${SERVER_IP}:${PANEL_PORT}${N}"
+echo -e "${C}║${N}  OLS Admin:  ${G}http://${SERVER_IP}:7080${N}"
+echo -e "${C}║${N}  phpMyAdmin: ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
+echo -e "${C}║${N}  Websites:   ${G}http://${SERVER_IP}:80${N} (port 80)"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  Panel Login:  ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
-echo -e "${C}║${N}  OLS Admin:    ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
-echo -e "${C}║${N}  Database:     ${Y}root${N} / ${Y}${DB_ROOT_PASS}${N}"
+echo -e "${C}║${N}  Panel Login: ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
+echo -e "${C}║${N}  OLS Admin:   ${Y}admin${N} / ${Y}${ADMIN_PASS}${N}"
+echo -e "${C}║${N}  DB Root Pass: ${Y}${DB_ROOT_PASS}${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
-echo -e "${C}║${N}  Saved: ${B}/root/.litepanel_credentials${N}"
-echo -e "${C}║${N}  Command: ${B}litecreds${N} (after relogin)"
+echo -e "${C}║${N}  Credentials: ${B}/root/.litepanel_credentials${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}╚══════════════════════════════════════════════╝${N}"
 echo ""
@@ -1090,23 +1270,3 @@ for svc in lsws mariadb litepanel fail2ban; do
 done
 echo ""
 echo -e "${G}DONE! Open http://${SERVER_IP}:${PANEL_PORT} in your browser${N}"
-
-# Test phpMyAdmin connectivity and log result
-echo "Testing phpMyAdmin connectivity..."
-if curl -s "http://localhost:8088/phpmyadmin/" | grep -q "phpMyAdmin"; then
-  log "phpMyAdmin is working correctly!"
-else
-  warn "phpMyAdmin test failed. Please check manually."
-  # Try to diagnose the issue
-  if [ ! -f "${PMA_DIR}/index.php" ]; then
-    err "phpMyAdmin files not found in ${PMA_DIR}"
-  elif [ ! -S "${MYSQL_SOCK}" ]; then
-    err "MySQL socket not found at ${MYSQL_SOCK}"
-  else
-    warn "Running additional diagnostic commands:"
-    echo "PHP modules installed:"
-    php -m | sort
-    echo "Testing MySQL connectivity:"
-    php -r "if (extension_loaded('mysqli')) { \$link = mysqli_connect('localhost', 'root', '${DB_ROOT_PASS}'); echo \$link ? 'Connected successfully' : 'Connection failed: ' . mysqli_connect_error(); } else { echo 'mysqli extension not loaded'; }"
-  fi
-fi

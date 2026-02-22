@@ -119,7 +119,7 @@ sudo bash uninstall.sh
 
 After installation, credentials are saved to:
 ```
-/root/.litepanel_credentials
+/etc/litepanel/credentials
 ```
 
 ⚠️ **Save credentials and delete this file!**

@@ -811,7 +811,7 @@ app.post('/api/files/mkdir', auth, function(req, res) {
 
 app.post('/api/files/rename', auth, function(req, res) {
   try { fs.renameSync(req.body.oldPath, req.body.newPath); res.json({ success: true }); }
-  catch(e) { res.status(500).json({ error: e.message }); }
+  catch(e) { res.status(500).json({ error: e.error || e.message }); }
 });
 
 app.get('/api/files/download', auth, function(req, res) {
@@ -1020,11 +1020,46 @@ app.delete('/api/domains/:name', auth, function(req, res) {
 /* === Databases === */
 app.get('/api/databases', auth, function(req, res) {
   try {
-    var out = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
+    // Get all databases 
+    var dbOutput = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
     var skip = ['information_schema','performance_schema','mysql','sys'];
-    res.json(out.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); }));
-  } catch(e) { res.json([]); }
+    var databases = dbOutput.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); });
+    
+    // Get all users
+    var userOutput = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + 
+                        "' -e 'SELECT User, Host FROM mysql.user WHERE Host=\"localhost\" AND User NOT IN (\"root\",\"debian-sys-maint\",\"mariadb.sys\");' -s -N 2>/dev/null");
+    var users = userOutput.split('\n').filter(function(u) { return u.trim(); }).map(function(u) {
+      var parts = u.split('\t');
+      return { username: parts[0], host: parts[1] || 'localhost' };
+    });
+    
+    // Get grants for each user
+    var result = [];
+    databases.forEach(function(db) {
+      var dbUsers = [];
+      users.forEach(function(user) {
+        // Check if user has privileges on this database
+        var grantOutput = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + 
+                             "' -e 'SHOW GRANTS FOR \"" + user.username + "\"@\"" + user.host + "\";' -s -N 2>/dev/null");
+        
+        if (grantOutput.includes('`' + db + '`') || grantOutput.includes('*.*')) {
+          dbUsers.push(user.username);
+        }
+      });
+      
+      result.push({
+        name: db,
+        users: dbUsers
+      });
+    });
+    
+    res.json(result);
+  } catch(e) { 
+    console.error(e);
+    res.json([]); 
+  }
 });
+
 app.post('/api/databases', auth, function(req, res) {
   var name = req.body.name, user = req.body.user, password = req.body.password;
   if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name' });
@@ -1039,6 +1074,7 @@ app.post('/api/databases', auth, function(req, res) {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.delete('/api/databases/:name', auth, function(req, res) {
   if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
   try {
@@ -1107,6 +1143,7 @@ cat > public/index.html <<'HTMLEOF'
       <button type="submit">Login</button>
       <div id="loginError" class="error"></div>
     </form>
+    <div class="copyright">LitePanel© by Boy Barley</div>
   </div>
 </div>
 <div id="mainPanel" class="main-panel" style="display:none">
@@ -1159,6 +1196,7 @@ body {
   border-radius: 12px; 
   width: 360px; 
   box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+  position: relative;
 }
 .login-box h1 { 
   text-align: center; 
@@ -1201,6 +1239,16 @@ body {
   text-align: center; 
   margin-top: 10px; 
   font-size: 14px;
+}
+.copyright {
+  position: absolute;
+  bottom: -30px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: #7f8c8d;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* Main Layout */
@@ -1848,6 +1896,62 @@ textarea.form-control {
   padding: 10px; 
   border-radius: 6px; 
   outline: none;
+}
+
+/* Database Section */
+.db-list {
+  margin-top: 15px;
+}
+
+.db-item {
+  background: #fff;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  border-left: 3px solid #3498db;
+}
+
+.db-header {
+  padding: 12px 15px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #f1f1f1;
+}
+
+.db-name {
+  font-weight: 600;
+  color: #2c3e50;
+  display: flex;
+  align-items: center;
+}
+
+.db-name i {
+  margin-right: 8px;
+  color: #3498db;
+}
+
+.db-users {
+  padding: 10px 15px 10px 35px;
+  font-size: 13px;
+}
+
+.db-user {
+  display: flex;
+  align-items: center;
+  margin-bottom: 5px;
+  color: #7f8c8d;
+}
+
+.db-user i {
+  margin-right: 8px;
+  font-size: 12px;
+  color: #95a5a6;
+}
+
+.db-actions {
+  display: flex;
+  gap: 8px;
 }
 
 /* Helpers */
@@ -3136,18 +3240,56 @@ window.delDom=function(btn){ var n=btn.dataset.dom; if(confirm('Delete domain '+
 // Databases Page
 function pgDb(el) {
   Promise.all([api.get('/api/databases'),api.get('/api/dashboard')]).then(function(res){
-    var d=res[0],info=res[1];
-    el.innerHTML='<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2><p class="page-sub">MariaDB database management</p><div id="dbMsg"></div>'
-      +'<div class="flex-row">'
-      +'<div><label style="font-size:13px;color:#7f8c8d">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
-      +'<div><label style="font-size:13px;color:#7f8c8d">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
-      +'<div><label style="font-size:13px;color:#7f8c8d">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
-      +'<button class="btn btn-p" onclick="addDb()"><i class="fas fa-plus"></i> Create</button></div>'
-      +'<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
-      +(Array.isArray(d)?d:[]).map(function(x){return '<tr><td><strong>'+esc(x)+'</strong></td><td><button class="btn btn-d btn-sm" data-db="'+esc(x)+'" onclick="dropDb(this)"><i class="fas fa-trash-alt"></i> Drop</button></td></tr>';}).join('')
-      +'</tbody></table><div class="mt"><a href="http://'+info.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w"><i class="fas fa-database"></i> Open phpMyAdmin</a></div>';
+    var databases=res[0],info=res[1];
+    
+    // Start building the HTML
+    var html = '<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2>';
+    html += '<p class="page-sub">MariaDB database management</p><div id="dbMsg"></div>';
+    
+    // Form for creating new database and user
+    html += '<div class="flex-row">';
+    html += '<div><label style="font-size:13px;color:#7f8c8d">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>';
+    html += '<div><label style="font-size:13px;color:#7f8c8d">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>';
+    html += '<div><label style="font-size:13px;color:#7f8c8d">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>';
+    html += '<button class="btn btn-p" onclick="addDb()"><i class="fas fa-plus"></i> Create</button></div>';
+    
+    // Database list with users
+    html += '<div class="db-list">';
+    if (Array.isArray(databases) && databases.length > 0) {
+      databases.forEach(function(db) {
+        html += '<div class="db-item">';
+        html += '<div class="db-header">';
+        html += '<div class="db-name"><i class="fas fa-database"></i> ' + esc(db.name) + '</div>';
+        html += '<div class="db-actions">';
+        html += '<button class="btn btn-d btn-sm" data-db="' + esc(db.name) + '" onclick="dropDb(this)"><i class="fas fa-trash-alt"></i> Drop</button>';
+        html += '</div>'; // End db-actions
+        html += '</div>'; // End db-header
+        
+        // Show users for this database
+        if (db.users && db.users.length > 0) {
+          html += '<div class="db-users">';
+          db.users.forEach(function(user) {
+            html += '<div class="db-user"><i class="fas fa-user"></i> ' + esc(user) + '</div>';
+          });
+          html += '</div>'; // End db-users
+        } else {
+          html += '<div class="db-users"><div class="db-user"><i class="fas fa-info-circle"></i> No users assigned to this database</div></div>';
+        }
+        
+        html += '</div>'; // End db-item
+      });
+    } else {
+      html += '<div class="card mb"><p class="text-center" style="color:#7f8c8d;padding:20px;">No databases yet</p></div>';
+    }
+    html += '</div>'; // End db-list
+    
+    // Link to phpMyAdmin
+    html += '<div class="mt"><a href="http://' + info.ip + ':8088/phpmyadmin/" target="_blank" class="btn btn-w"><i class="fas fa-database"></i> Open phpMyAdmin</a></div>';
+    
+    el.innerHTML = html;
   });
 }
+
 window.addDb=function(){
   api.post('/api/databases',{name:$('dbName').value,user:$('dbUser').value,password:$('dbPass').value}).then(function(r){
     $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Created!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';

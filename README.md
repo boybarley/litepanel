@@ -52,6 +52,13 @@ chmod +x patch.sh
 sudo bash patch.sh
 ```
 
+
+## Quick Uninstall
+```bash
+#!/bin/bash
+wget -O uninstall.sh https://raw.githubusercontent.com/boybarley/litepanel/main/uninstall.sh && chmod +x uninstall.sh && sudo bash uninstall.sh
+```
+
 ## What You'll Need During Install
 
 The installer will ask for:

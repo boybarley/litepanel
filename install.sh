@@ -729,11 +729,8 @@ app.post('/api/services/:name/:action', auth, function(req, res) {
 
 /* === File Manager === */
 app.get('/api/files', auth, function(req, res) {
+  var p = path.resolve(req.query.path || '/');
   try {
-    // Decode the URL-encoded path first
-    var rawPath = req.query.path || '/';
-    var p = path.resolve(decodeURIComponent(rawPath));
-    
     var stat = fs.statSync(p);
     if (stat.isDirectory()) {
       var items = [];
@@ -764,10 +761,7 @@ app.get('/api/files', auth, function(req, res) {
         extension: path.extname(p).toLowerCase().substring(1)
       });
     }
-  } catch(e) { 
-    console.error('File error:', e.message, 'Path:', req.query.path);
-    res.status(404).json({ error: e.message }); 
-  }
+  } catch(e) { res.status(404).json({ error: e.message }); }
 });
 
 app.put('/api/files', auth, function(req, res) {
@@ -821,13 +815,9 @@ app.post('/api/files/rename', auth, function(req, res) {
 });
 
 app.get('/api/files/download', auth, function(req, res) {
+  var fp = req.query.path;
+  if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
   try { 
-    var rawPath = req.query.path;
-    if (!rawPath) return res.status(404).json({ error: 'Path not specified' });
-    
-    var fp = decodeURIComponent(rawPath);
-    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
-    
     if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); 
     
     // Set appropriate content type
@@ -840,10 +830,7 @@ app.get('/api/files/download', auth, function(req, res) {
     // Stream the file
     fs.createReadStream(fp).pipe(res);
   }
-  catch(e) { 
-    console.error('Download error:', e.message);
-    res.status(500).json({ error: e.message }); 
-  }
+  catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // New archive/compress endpoint
@@ -2051,10 +2038,7 @@ function pgFiles(el, p) {
 }
 
 function loadFileManager(path) {
-  // Make sure path is properly encoded for the API call
-  const encodedPath = encodeURIComponent(path);
-  
-  api.get('/api/files?path=' + encodedPath).then(function(d) {
+  api.get('/api/files?path='+encodeURIComponent(path)).then(function(d) {
     if (d.error) { 
       $('fileManagerContainer').innerHTML ='<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+esc(d.error)+'</div>';
       return; 
@@ -2095,7 +2079,7 @@ function loadFileManager(path) {
     var bp = '';
     parts.forEach(function(x) { 
       bp += '/'+x; 
-      bc += ' <span>/</span> <a data-path="'+encodeURIComponent(bp)+'" onclick="navToPath(this)">'+esc(x)+'</a>'; 
+      bc += ' <span>/</span> <a data-path="'+bp+'" onclick="navToPath(this)">'+esc(x)+'</a>'; 
     });
     
     // Sort items
@@ -2124,7 +2108,7 @@ function loadFileManager(path) {
         
         <div class="file-container" id="fileList">
           ${parentPath ? 
-            `<div class="file-item" data-path="${encodeURIComponent(parentPath)}" ondblclick="navToPath(this)">
+            `<div class="file-item" data-path="${parentPath}" ondblclick="navToPath(this)">
               <div class="checkbox-wrapper"></div>
               <i class="fas fa-level-up-alt icon"></i>
               <span class="name">..</span>
@@ -2135,10 +2119,10 @@ function loadFileManager(path) {
           ${items.map(function(item) {
             var itemPath = (path === '/' ? '' : path) + '/' + item.name;
             return `
-              <div class="file-item" data-path="${encodeURIComponent(itemPath)}" data-filename="${item.name}" 
+              <div class="file-item" data-path="${itemPath}" data-filename="${item.name}" 
                    onclick="selectFile(this, event)" ondblclick="openFile(this)" oncontextmenu="showFileContextMenu(event, this)">
                 <div class="checkbox-wrapper">
-                  <input type="checkbox" onclick="event.stopPropagation()" onchange="checkboxChanged(this, '${encodeURIComponent(itemPath)}')">
+                  <input type="checkbox" onclick="event.stopPropagation()" onchange="checkboxChanged(this, '${itemPath}')">
                 </div>
                 ${getFileIconHtml(item)}
                 <span class="name">${esc(item.name)}</span>
@@ -2198,10 +2182,6 @@ function sortFiles(files) {
 
 function navToPath(el) {
   var path = el.getAttribute('data-path');
-  
-  // Make sure the path is properly decoded before use
-  path = decodeURIComponent(path);
-  
   loadFileManager(path);
   curPath = path;
   
@@ -2223,7 +2203,7 @@ function selectFile(el, e) {
     checkbox.checked = el.classList.contains('selected');
     
     // Update selected files array
-    var path = decodeURIComponent(el.getAttribute('data-path'));
+    var path = el.getAttribute('data-path');
     if (el.classList.contains('selected')) {
       if (!selectedFiles.includes(path)) selectedFiles.push(path);
     } else {
@@ -2249,7 +2229,7 @@ function selectFile(el, e) {
       items[i].classList.add('selected');
       items[i].querySelector('input[type="checkbox"]').checked = true;
       
-      var path = decodeURIComponent(items[i].getAttribute('data-path'));
+      var path = items[i].getAttribute('data-path');
       if (!selectedFiles.includes(path)) selectedFiles.push(path);
     }
     
@@ -2267,7 +2247,7 @@ function selectFile(el, e) {
     checkbox.checked = true;
     
     // Update selected files array
-    selectedFiles = [decodeURIComponent(el.getAttribute('data-path'))];
+    selectedFiles = [el.getAttribute('data-path')];
   }
   
   updateSelectedCount();
@@ -2275,14 +2255,13 @@ function selectFile(el, e) {
 
 function checkboxChanged(checkbox, path) {
   var fileItem = checkbox.closest('.file-item');
-  var decodedPath = decodeURIComponent(path);
   
   if (checkbox.checked) {
     fileItem.classList.add('selected');
-    if (!selectedFiles.includes(decodedPath)) selectedFiles.push(decodedPath);
+    if (!selectedFiles.includes(path)) selectedFiles.push(path);
   } else {
     fileItem.classList.remove('selected');
-    selectedFiles = selectedFiles.filter(p => p !== decodedPath);
+    selectedFiles = selectedFiles.filter(p => p !== path);
   }
   
   updateSelectedCount();
@@ -2309,7 +2288,7 @@ function toggleSelectAll() {
       var checkbox = item.querySelector('input[type="checkbox"]');
       if (checkbox) checkbox.checked = true;
       
-      var path = decodeURIComponent(item.getAttribute('data-path'));
+      var path = item.getAttribute('data-path');
       selectedFiles.push(path);
     });
   }
@@ -2357,11 +2336,11 @@ function showFileContextMenu(e, el) {
     var checkbox = el.querySelector('input[type="checkbox"]');
     if (checkbox) checkbox.checked = true;
     
-    selectedFiles = [decodeURIComponent(el.getAttribute('data-path'))];
+    selectedFiles = [el.getAttribute('data-path')];
     updateSelectedCount();
   }
   
-  var path = decodeURIComponent(el.getAttribute('data-path'));
+  var path = el.getAttribute('data-path');
   var fileName = el.getAttribute('data-filename');
   var isFolder = el.querySelector('.icon.folder') !== null;
   
@@ -2462,7 +2441,7 @@ function hideContextMenu() {
 }
 
 function openFile(el) {
-  var path = decodeURIComponent(el.getAttribute('data-path'));
+  var path = el.getAttribute('data-path');
   var isFolder = el.querySelector('.icon.folder') !== null;
   
   if (isFolder) {

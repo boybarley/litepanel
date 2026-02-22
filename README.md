@@ -72,16 +72,16 @@ After installation:
 
 | Service | URL |
 |---------|-----|
-| Panel | `https://panel.yourdomain.com` |
-| Website | `https://yourdomain.com` |
-| phpMyAdmin | `https://db.yourdomain.com` |
+| Panel | `http://your-ip:3000 |
+| OLS Admin |  http://your-ip:7080 |
+| phpMyAdmin | http://your-ip:8088/phpmyadmin/ |
 
 ## Default Ports (Internal Only)
 
 | Port | Service |
 |------|---------|
-| 2087 | Panel |
-| 8080 | Web |
+| 3000 | Panel |
+| 7080 | OLS |
 | 22 | SSH (only open port) |
 
 > ⚠️ No ports are exposed publicly. All access goes through Cloudflare Tunnel.

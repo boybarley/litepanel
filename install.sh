@@ -1,9 +1,9 @@
 #!/bin/bash
 ############################################
-# LitePanel Installer v2.2 (Production)
+# LitePanel Installer v1.1
 # Fresh Ubuntu 22.04 LTS Only
-# FIXED: Extract button, Create DB, Paste reliability
-# NEW: Add Subdomain feature
+# by Boy Barley
+# www.boybarley.com
 ############################################
 
 export DEBIAN_FRONTEND=noninteractive
@@ -44,8 +44,8 @@ done
 clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
-echo "  ║   LitePanel Installer v2.2       ║"
-echo "  ║   Ubuntu 22.04 LTS              ║"
+echo "  ║   LitePanel Installer v1.1.      ║"
+echo "  ║   Ubuntu 22.04 LTS               ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2
@@ -2434,13 +2434,13 @@ cp /etc/litepanel/credentials /root/.litepanel_credentials
 ########################################
 echo ""
 echo -e "${C}╔══════════════════════════════════════════════╗${N}"
-echo -e "${C}║      ✅ LitePanel v2.2 Installed!            ║${N}"
+echo -e "${C}║      ✅ LitePanel v1.1 Installed!            ║${N}"
 echo -e "${C}╠══════════════════════════════════════════════╣${N}"
 echo -e "${C}║${N}  Panel:      ${G}http://${SERVER_IP}:${PANEL_PORT}${N}"
 echo -e "${C}║${N}  OLS Admin:  ${G}http://${SERVER_IP}:7080${N}"
 echo -e "${C}║${N}  phpMyAdmin: ${G}http://${SERVER_IP}:8088/phpmyadmin/${N}"
 echo -e "${C}║${N}  Login:      ${Y}${ADMIN_USER}${N} / ${Y}${ADMIN_PASS}${N}"
-echo -e "${C}║${N}  DB Root:    ${Y}${DB_ROOT_PASS}${N}"
+echo -e "${C}║${N}  DB root:    ${Y}${DB_ROOT_PASS}${N}"
 echo -e "${C}║${N}  Saved:      ${B}/etc/litepanel/credentials${N}"
 echo -e "${C}╚══════════════════════════════════════════════╝${N}"
 echo ""

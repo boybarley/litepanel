@@ -49,7 +49,7 @@ clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
 echo "  ║   LitePanel Installer v2.1       ║"
-echo "  ║   Ubuntu 22.04 LTS               ║"
+echo "  ║   Ubuntu 22.04 LTS              ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2
@@ -1033,95 +1033,11 @@ app.delete('/api/domains/:name', auth, function(req, res) {
 /* === Databases === */
 app.get('/api/databases', auth, function(req, res) {
   try {
-    var dblist = [];
-    
-    // Get databases
     var out = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SHOW DATABASES;' -s -N 2>/dev/null");
     var skip = ['information_schema','performance_schema','mysql','sys'];
-    var dbNames = out.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); });
-    
-    // Get users
-    var userMap = {};
-    var userOut = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SELECT user, host FROM mysql.user;' -s -N 2>/dev/null");
-    var users = userOut.split('\n').filter(Boolean).map(function(line) { 
-      var parts = line.split('\t');
-      return {
-        user: parts[0],
-        host: parts[1]
-      };
-    });
-    
-    // Get database sizes
-    for (var i = 0; i < dbNames.length; i++) {
-      var dbName = dbNames[i];
-      
-      // Get DB size
-      var sizeQuery = "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) as size FROM information_schema.TABLES WHERE table_schema = '" + dbName + "';";
-      var sizeOut = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"" + sizeQuery + "\" -s -N 2>/dev/null");
-      var sizeInMB = parseFloat(sizeOut) || 0;
-      
-      // Get DB tables count
-      var tableQuery = "SELECT COUNT(*) FROM information_schema.TABLES WHERE table_schema = '" + dbName + "';";
-      var tableOut = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"" + tableQuery + "\" -s -N 2>/dev/null");
-      var tableCount = parseInt(tableOut) || 0;
-      
-      // Get privileges/users
-      var dbUsers = [];
-      for (var j = 0; j < users.length; j++) {
-        var user = users[j];
-        if (user.user !== 'root') {
-          // Check if user has privilege on this database
-          var privQuery = "SHOW GRANTS FOR '" + user.user + "'@'" + user.host + "'";
-          var privOut = "";
-          
-          try {
-            privOut = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"" + privQuery + "\" 2>/dev/null");
-            // Check if user has privileges on this database
-            if (privOut.includes(dbName)) {
-              dbUsers.push({
-                username: user.user,
-                host: user.host
-              });
-            }
-          } catch (e) {
-            // If error, skip this user
-          }
-        }
-      }
-      
-      dblist.push({
-        name: dbName,
-        size: sizeInMB,
-        tables: tableCount,
-        users: dbUsers,
-        created: new Date().toISOString() // We don't have created date from MySQL, using current as fallback
-      });
-    }
-    
-    res.json(dblist);
-  } catch(e) { 
-    console.error("Database error:", e);
-    res.json([]); 
-  }
+    res.json(out.split('\n').filter(function(d) { return d.trim() && !skip.includes(d.trim()); }));
+  } catch(e) { res.json([]); }
 });
-
-app.get('/api/database/users', auth, function(req, res) {
-  try {
-    var userOut = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e 'SELECT user, host FROM mysql.user WHERE user NOT IN (\"root\", \"debian-sys-maint\", \"mysql.sys\", \"mysql.session\", \"mysql.infoschema\");' -s -N 2>/dev/null");
-    var users = userOut.split('\n').filter(Boolean).map(function(line) { 
-      var parts = line.split('\t');
-      return {
-        username: parts[0],
-        host: parts[1] || 'localhost'
-      };
-    });
-    
-    res.json(users);
-  } catch(e) { 
-    res.json([]); 
-  }
-});
-
 app.post('/api/databases', auth, function(req, res) {
   var name = req.body.name, user = req.body.user, password = req.body.password;
   if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name' });
@@ -1136,57 +1052,10 @@ app.post('/api/databases', auth, function(req, res) {
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-
-app.post('/api/database/users', auth, function(req, res) {
-  var username = req.body.username, password = req.body.password;
-  if (!username || !/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Invalid username' });
-  if (!password) return res.status(400).json({ error: 'Password is required' });
-  
-  try {
-    var dp = shellEsc(config.dbRootPass);
-    var sp = shellEsc(password);
-    run("mysql -u root -p'" + dp + "' -e \"CREATE USER '" + username + "'@'localhost' IDENTIFIED BY '" + sp + "';\" 2>/dev/null");
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/database/assign', auth, function(req, res) {
-  var username = req.body.username, dbname = req.body.dbname, privileges = req.body.privileges || 'ALL';
-  if (!username || !/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Invalid username' });
-  if (!dbname || !/^[a-zA-Z0-9_]+$/.test(dbname)) return res.status(400).json({ error: 'Invalid database name' });
-  
-  try {
-    var dp = shellEsc(config.dbRootPass);
-    run("mysql -u root -p'" + dp + "' -e \"GRANT " + privileges + " ON \\`" + dbname + "\\`.* TO '" + username + "'@'localhost'; FLUSH PRIVILEGES;\" 2>/dev/null");
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 app.delete('/api/databases/:name', auth, function(req, res) {
   if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
   try {
     run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"DROP DATABASE IF EXISTS \\`" + req.params.name + "\\`;\" 2>/dev/null");
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/database/users/:name', auth, function(req, res) {
-  if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
-  try {
-    run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"DROP USER IF EXISTS '" + req.params.name + "'@'localhost';\" 2>/dev/null");
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/database/user/password', auth, function(req, res) {
-  var username = req.body.username, password = req.body.password;
-  if (!username || !/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Invalid username' });
-  if (!password) return res.status(400).json({ error: 'Password is required' });
-  
-  try {
-    var dp = shellEsc(config.dbRootPass);
-    var sp = shellEsc(password);
-    run("mysql -u root -p'" + dp + "' -e \"ALTER USER '" + username + "'@'localhost' IDENTIFIED BY '" + sp + "';\" 2>/dev/null");
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1251,7 +1120,6 @@ cat > public/index.html <<'HTMLEOF'
       <button type="submit">Login</button>
       <div id="loginError" class="error"></div>
     </form>
-    <div class="copyright">LitePanel© by Boy Barley</div>
   </div>
 </div>
 <div id="mainPanel" class="main-panel" style="display:none">
@@ -1346,12 +1214,6 @@ body {
   text-align: center; 
   margin-top: 10px; 
   font-size: 14px;
-}
-.copyright {
-  text-align: center;
-  color: #7f8c8d;
-  font-size: 12px;
-  margin-top: 20px;
 }
 
 /* Main Layout */
@@ -1971,143 +1833,6 @@ textarea.form-control {
   background: #e74c3c;
 }
 
-/* Database Page Styles */
-.db-list {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-}
-
-.db-item {
-  background: #fff;
-  border-radius: 10px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-  overflow: hidden;
-}
-
-.db-header {
-  padding: 16px;
-  background: #f8f9fa;
-  border-bottom: 1px solid #ecf0f1;
-}
-
-.db-name {
-  font-weight: 600;
-  font-size: 16px;
-  color: #2c3e50;
-  margin-bottom: 5px;
-}
-
-.db-stats {
-  display: flex;
-  gap: 15px;
-  margin-bottom: 10px;
-  font-size: 13px;
-  color: #7f8c8d;
-}
-
-.db-stat {
-  display: flex;
-  align-items: center;
-}
-
-.db-stat i {
-  margin-right: 5px;
-}
-
-.db-users {
-  padding: 12px 16px;
-}
-
-.db-users-title {
-  font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 10px;
-  color: #34495e;
-}
-
-.db-user-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 0;
-  font-size: 13px;
-  border-bottom: 1px solid #ecf0f1;
-}
-
-.db-user-item:last-child {
-  border-bottom: none;
-}
-
-.db-actions {
-  padding: 12px 16px;
-  display: flex;
-  gap: 8px;
-  border-top: 1px solid #ecf0f1;
-}
-
-.db-tabs {
-  display: flex;
-  margin-bottom: 20px;
-  background: #fff;
-  border-radius: 8px;
-  padding: 5px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-}
-
-.db-tab {
-  padding: 10px 16px;
-  cursor: pointer;
-  font-size: 14px;
-  color: #7f8c8d;
-  transition: all 0.2s;
-  border-radius: 6px;
-}
-
-.db-tab:hover {
-  color: #4a89dc;
-}
-
-.db-tab.active {
-  background: #4a89dc;
-  color: white;
-}
-
-.db-user-list {
-  background: #fff;
-  border-radius: 10px;
-  overflow: hidden;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-  margin-bottom: 20px;
-}
-
-.db-user-header {
-  padding: 15px;
-  border-bottom: 1px solid #ecf0f1;
-  font-weight: 600;
-  font-size: 14px;
-  color: #2c3e50;
-  background: #f8f9fa;
-}
-
-.user-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 15px;
-  border-bottom: 1px solid #ecf0f1;
-}
-
-.user-name {
-  font-size: 14px;
-  color: #34495e;
-}
-
-.user-host {
-  font-size: 12px;
-  color: #7f8c8d;
-}
-
 /* Terminal */
 .terminal-box { 
   background: #2d3436; 
@@ -2228,7 +1953,6 @@ var editFile = '';
 var selectedFiles = [];
 var sortConfig = { key: 'name', direction: 'asc' };
 var clipboard = { items: [], action: '' };
-var activeDbTab = 'databases'; // For database page
 
 // Authentication functions
 function checkAuth() {
@@ -2603,8 +2327,9 @@ function updateSelectedCount() {
     // Add action buttons for selection
     countEl.innerHTML += `
       <button class="btn btn-l btn-sm" onclick="showBulkAction('copy')"><i class="fas fa-copy"></i> Copy</button>
-      ${selectedFiles.length === 1 ? `<button class="btn btn-l btn-sm" onclick="showBulkAction('rename')"><i class="fas fa-edit"></i> Rename</button>` : ''}
+      <button class="btn btn-l btn-sm" onclick="showBulkAction('cut')"><i class="fas fa-cut"></i> Cut</button>
       <button class="btn btn-d btn-sm" onclick="showBulkAction('delete')"><i class="fas fa-trash-alt"></i> Delete</button>
+      ${selectedFiles.length === 1 ? `<button class="btn btn-l btn-sm" onclick="showBulkAction('rename')"><i class="fas fa-edit"></i> Rename</button>` : ''}
       ${selectedFiles.length >= 1 ? `<button class="btn btn-l btn-sm" onclick="showBulkAction('compress')"><i class="fas fa-file-archive"></i> Compress</button>` : ''}
     `;
   } else {
@@ -2653,9 +2378,6 @@ function showFileContextMenu(e, el) {
   
   if (!isFolder) {
     menu.innerHTML += `
-      <div class="menu-item" onclick="editFile('${path}')">
-        <i class="fas fa-edit"></i> Edit
-      </div>
       <div class="menu-item" onclick="downloadSelectedFiles()">
         <i class="fas fa-download"></i> Download
       </div>
@@ -2668,6 +2390,9 @@ function showFileContextMenu(e, el) {
     </div>
     <div class="menu-item" onclick="showBulkAction('copy')">
       <i class="fas fa-copy"></i> Copy
+    </div>
+    <div class="menu-item" onclick="showBulkAction('cut')">
+      <i class="fas fa-cut"></i> Cut
     </div>
     <div class="divider"></div>
     <div class="menu-item" onclick="showBulkAction('delete')">
@@ -2691,6 +2416,15 @@ function showFileContextMenu(e, el) {
         <div class="divider"></div>
         <div class="menu-item" onclick="showExtractDialog('${path}')">
           <i class="fas fa-box-open"></i> Extract
+        </div>
+      `;
+    }
+    
+    // Option to edit text files
+    if (['txt', 'html', 'css', 'js', 'php', 'conf', 'json', 'md', 'xml', 'ini'].includes(ext)) {
+      menu.innerHTML += `
+        <div class="menu-item" onclick="editFile('${path}')">
+          <i class="fas fa-edit"></i> Edit
         </div>
       `;
     }
@@ -2978,6 +2712,11 @@ function showBulkAction(action) {
     case 'copy':
       clipboard = { items: selectedFiles.slice(), action: 'copy' };
       showNotification('Copied ' + selectedFiles.length + ' item(s) to clipboard');
+      updateSelectedCount();
+      break;
+    case 'cut':
+      clipboard = { items: selectedFiles.slice(), action: 'cut' };
+      showNotification('Cut ' + selectedFiles.length + ' item(s) to clipboard');
       updateSelectedCount();
       break;
     case 'rename':
@@ -3284,23 +3023,33 @@ function pasteFiles() {
     // Skip if source and target are the same
     if (sourcePath === targetPath) continue;
     
-    // For now, we just support copying with rename endpoint
-    operations.push(
-      api.post('/api/files/rename', { oldPath: sourcePath, newPath: targetPath })
-    );
+    if (operation === 'copy') {
+      // For copy, we'll need to implement a recursive copy on the server
+      operations.push({ source: sourcePath, target: targetPath });
+    } else if (operation === 'cut') {
+      // For cut, we can use the rename endpoint
+      operations.push(
+        api.post('/api/files/rename', { oldPath: sourcePath, newPath: targetPath })
+      );
+    }
   }
   
-  if (operations.length > 0) {
+  // If it's a cut operation, we can use the API directly
+  if (operation === 'cut' && operations.length > 0) {
     Promise.all(operations)
       .then(() => {
         clipboard.items = [];
         clipboard.action = '';
-        showNotification('Pasted ' + paths.length + ' item(s) successfully');
+        showNotification('Moved ' + paths.length + ' item(s) successfully');
         loadFileManager(curPath);
       })
       .catch(err => {
         showNotification('Error: ' + err.message);
       });
+  } else if (operation === 'copy') {
+    // For copy, we'd need a server-side implementation
+    // For now, just show a not implemented message
+    showNotification('Copy operation not fully implemented yet');
   }
 }
 
@@ -3359,6 +3108,12 @@ function handleFileManagerKeydown(e) {
     showBulkAction('copy');
   }
   
+  // Ctrl+X: Cut
+  if (e.ctrlKey && e.key === 'x' && selectedFiles.length > 0) {
+    e.preventDefault();
+    showBulkAction('cut');
+  }
+  
   // Ctrl+V: Paste
   if (e.ctrlKey && e.key === 'v' && clipboard.items && clipboard.items.length > 0) {
     e.preventDefault();
@@ -3399,370 +3154,28 @@ window.addDom=function(){
 };
 window.delDom=function(btn){ var n=btn.dataset.dom; if(confirm('Delete domain '+n+'?'))api.del('/api/domains/'+n).then(function(){loadPage('domains')}); };
 
-// Databases Page with cPanel-like UI
+// Databases Page
 function pgDb(el) {
-  el.innerHTML = '<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2>' +
-    '<p class="page-sub">MySQL/MariaDB database management</p>' + 
-    '<div id="dbMsg"></div>' +
-    '<div class="db-tabs">' +
-    `<div class="db-tab ${activeDbTab === 'databases' ? 'active' : ''}" onclick="switchDbTab('databases')"><i class="fas fa-database"></i> Databases</div>` +
-    `<div class="db-tab ${activeDbTab === 'users' ? 'active' : ''}" onclick="switchDbTab('users')"><i class="fas fa-users"></i> Users</div>` +
-    `<div class="db-tab ${activeDbTab === 'privileges' ? 'active' : ''}" onclick="switchDbTab('privileges')"><i class="fas fa-key"></i> Privileges</div>` +
-    '</div>' +
-    '<div id="dbContent"></div>';
-  
-  loadDbTab();
-}
-
-function switchDbTab(tab) {
-  activeDbTab = tab;
-  loadDbTab();
-}
-
-function loadDbTab() {
-  switch(activeDbTab) {
-    case 'databases':
-      loadDbDatabases();
-      break;
-    case 'users':
-      loadDbUsers();
-      break;
-    case 'privileges':
-      loadDbPrivileges();
-      break;
-  }
-  
-  // Update active tab styling
-  document.querySelectorAll('.db-tab').forEach(tab => {
-    tab.classList.remove('active');
+  Promise.all([api.get('/api/databases'),api.get('/api/dashboard')]).then(function(res){
+    var d=res[0],info=res[1];
+    el.innerHTML='<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2><p class="page-sub">MariaDB database management</p><div id="dbMsg"></div>'
+      +'<div class="flex-row">'
+      +'<div><label style="font-size:13px;color:#7f8c8d">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
+      +'<div><label style="font-size:13px;color:#7f8c8d">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
+      +'<div><label style="font-size:13px;color:#7f8c8d">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
+      +'<button class="btn btn-p" onclick="addDb()"><i class="fas fa-plus"></i> Create</button></div>'
+      +'<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
+      +(Array.isArray(d)?d:[]).map(function(x){return '<tr><td><strong>'+esc(x)+'</strong></td><td><button class="btn btn-d btn-sm" data-db="'+esc(x)+'" onclick="dropDb(this)"><i class="fas fa-trash-alt"></i> Drop</button></td></tr>';}).join('')
+      +'</tbody></table><div class="mt"><a href="http://'+info.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w"><i class="fas fa-database"></i> Open phpMyAdmin</a></div>';
   });
-  document.querySelector(`.db-tab:nth-child(${activeDbTab === 'databases' ? 1 : activeDbTab === 'users' ? 2 : 3})`).classList.add('active');
 }
-
-function loadDbDatabases() {
-  var dbContent = $('dbContent');
-  dbContent.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> Loading databases...</div>';
-  
-  Promise.all([api.get('/api/databases'), api.get('/api/dashboard')])
-    .then(function(results) {
-      var databases = results[0];
-      var info = results[1];
-      
-      var html = '<div class="flex-row space-between mb">' +
-        '<div class="form-group" style="flex: 1; max-width: 300px;">' +
-        '<label>Create Database</label>' +
-        '<input type="text" id="dbName" class="form-control" placeholder="db_name">' +
-        '</div>' +
-        '<div>' +
-        '<label>&nbsp;</label>' +
-        '<button class="btn btn-p" style="margin-top: 8px;" onclick="addDb()"><i class="fas fa-plus-circle"></i> Create Database</button>' +
-        '</div>' +
-        '</div>';
-      
-      if (databases.length === 0) {
-        html += '<div class="card"><div style="padding: 20px; text-align: center; color: #7f8c8d;">No databases found</div></div>';
-      } else {
-        html += '<div class="db-list">';
-        
-        databases.forEach(function(db) {
-          html += `
-            <div class="db-item">
-              <div class="db-header">
-                <div class="db-name">${esc(db.name)}</div>
-                <div class="db-stats">
-                  <div class="db-stat"><i class="fas fa-database"></i> ${db.size.toFixed(2)} MB</div>
-                  <div class="db-stat"><i class="fas fa-table"></i> ${db.tables} tables</div>
-                </div>
-              </div>
-              
-              <div class="db-users">
-                <div class="db-users-title">Assigned Users</div>
-                ${db.users.length > 0 ? 
-                  db.users.map(user => `
-                    <div class="db-user-item">
-                      <div>${esc(user.username)}@${esc(user.host)}</div>
-                    </div>
-                  `).join('') : 
-                  '<div style="color: #7f8c8d; font-style: italic; font-size: 13px;">No users assigned</div>'
-                }
-              </div>
-              
-              <div class="db-actions">
-                <a href="http://${info.ip}:8088/phpmyadmin/index.php?db=${db.name}" target="_blank" class="btn btn-p btn-sm">
-                  <i class="fas fa-external-link-alt"></i> phpMyAdmin
-                </a>
-                <button class="btn btn-d btn-sm" data-db="${esc(db.name)}" onclick="dropDb(this)">
-                  <i class="fas fa-trash-alt"></i> Delete
-                </button>
-              </div>
-            </div>
-          `;
-        });
-        
-        html += '</div>';
-      }
-      
-      dbContent.innerHTML = html;
-    });
-}
-
-function loadDbUsers() {
-  var dbContent = $('dbContent');
-  dbContent.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> Loading users...</div>';
-  
-  api.get('/api/database/users')
-    .then(function(users) {
-      var html = '<div class="flex-row space-between mb">' +
-        '<div class="form-group" style="flex: 1; max-width: 250px;">' +
-        '<label>Create User</label>' +
-        '<input type="text" id="newUser" class="form-control" placeholder="username">' +
-        '</div>' +
-        '<div class="form-group" style="flex: 1; max-width: 250px;">' +
-        '<label>Password</label>' +
-        '<input type="password" id="newUserPass" class="form-control" placeholder="password">' +
-        '</div>' +
-        '<div>' +
-        '<label>&nbsp;</label>' +
-        '<button class="btn btn-p" style="margin-top: 8px;" onclick="createDbUser()"><i class="fas fa-plus-circle"></i> Create User</button>' +
-        '</div>' +
-        '</div>';
-      
-      if (users.length === 0) {
-        html += '<div class="card"><div style="padding: 20px; text-align: center; color: #7f8c8d;">No database users found</div></div>';
-      } else {
-        html += '<div class="db-user-list">' +
-          '<div class="db-user-header">Database Users</div>';
-        
-        users.forEach(function(user) {
-          html += `
-            <div class="user-item">
-              <div>
-                <div class="user-name">${esc(user.username)}</div>
-                <div class="user-host">Host: ${esc(user.host)}</div>
-              </div>
-              <div>
-                <button class="btn btn-l btn-sm" onclick="showChangePasswordDialog('${esc(user.username)}')">
-                  <i class="fas fa-key"></i> Password
-                </button>
-                <button class="btn btn-d btn-sm" onclick="deleteDbUser('${esc(user.username)}')">
-                  <i class="fas fa-trash-alt"></i> Delete
-                </button>
-              </div>
-            </div>
-          `;
-        });
-        
-        html += '</div>';
-      }
-      
-      dbContent.innerHTML = html;
-    });
-}
-
-function loadDbPrivileges() {
-  var dbContent = $('dbContent');
-  dbContent.innerHTML = '<div style="text-align:center;padding:20px;"><i class="fas fa-spinner fa-spin"></i> Loading data...</div>';
-  
-  Promise.all([api.get('/api/databases'), api.get('/api/database/users')])
-    .then(function(results) {
-      var databases = results[0];
-      var users = results[1];
-      
-      if (databases.length === 0 || users.length === 0) {
-        var message = databases.length === 0 ? 'No databases found' : 'No users found';
-        dbContent.innerHTML = `<div class="card"><div style="padding: 20px; text-align: center; color: #7f8c8d;">${message}</div></div>`;
-        return;
-      }
-      
-      var html = '<div class="card mb">' +
-        '<div class="db-user-header">Add Privileges</div>' +
-        '<div style="padding: 15px;">' +
-        '<div class="flex-row space-between">' +
-        '<div class="form-group" style="flex: 1; max-width: 250px;">' +
-        '<label>User</label>' +
-        '<select id="privUser" class="form-control">';
-      
-      users.forEach(function(user) {
-        html += `<option value="${esc(user.username)}">${esc(user.username)}@${esc(user.host)}</option>`;
-      });
-      
-      html += '</select></div>' +
-        '<div class="form-group" style="flex: 1; max-width: 250px;">' +
-        '<label>Database</label>' +
-        '<select id="privDb" class="form-control">';
-      
-      databases.forEach(function(db) {
-        html += `<option value="${typeof db === 'string' ? esc(db) : esc(db.name)}">${typeof db === 'string' ? esc(db) : esc(db.name)}</option>`;
-      });
-      
-      html += '</select></div>' +
-        '<div>' +
-        '<label>&nbsp;</label>' +
-        '<button class="btn btn-p" style="margin-top: 8px;" onclick="assignDbPrivileges()"><i class="fas fa-plus-circle"></i> Add Privileges</button>' +
-        '</div></div></div></div>';
-      
-      html += '<div class="card">' +
-        '<div class="db-user-header">Current Privileges</div>';
-      
-      var hasPrivileges = false;
-      
-      databases.forEach(function(db) {
-        var dbName = typeof db === 'string' ? db : db.name;
-        var dbUsers = typeof db === 'object' && db.users ? db.users : [];
-        
-        if (dbUsers.length > 0) {
-          hasPrivileges = true;
-          html += `<div style="padding: 15px; border-bottom: 1px solid #ecf0f1;">
-            <div style="font-weight: 600; margin-bottom: 10px;">${esc(dbName)}</div>
-            <div>`;
-          
-          dbUsers.forEach(function(user) {
-            html += `<div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-              <div>${esc(user.username)}@${esc(user.host)}</div>
-              <button class="btn btn-d btn-sm" onclick="revokePrivilege('${esc(user.username)}', '${esc(dbName)}')">
-                <i class="fas fa-times"></i> Revoke
-              </button>
-            </div>`;
-          });
-          
-          html += '</div></div>';
-        }
-      });
-      
-      if (!hasPrivileges) {
-        html += '<div style="padding: 20px; text-align: center; color: #7f8c8d;">No privileges found</div>';
-      }
-      
-      html += '</div>';
-      
-      dbContent.innerHTML = html;
-    });
-}
-
-window.addDb = function() {
-  var name = $('dbName').value.trim();
-  if (!name) {
-    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter a database name</div>';
-    return;
-  }
-  
-  api.post('/api/databases', { name: name }).then(function(r) {
-    $('dbMsg').innerHTML = r.success ?
-      '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Database created successfully!</div>' :
-      '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to create database') + '</div>';
-    
-    if (r.success) setTimeout(function() { loadDbDatabases(); }, 1000);
+window.addDb=function(){
+  api.post('/api/databases',{name:$('dbName').value,user:$('dbUser').value,password:$('dbPass').value}).then(function(r){
+    $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Created!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
+    if(r.success)setTimeout(function(){loadPage('databases')},1000);
   });
 };
-
-window.dropDb = function(btn) {
-  var dbName = btn.dataset.db;
-  if (confirm('Are you sure you want to delete the database "' + dbName + '"? This cannot be undone!')) {
-    api.del('/api/databases/' + dbName).then(function() {
-      loadDbDatabases();
-    });
-  }
-};
-
-window.createDbUser = function() {
-  var username = $('newUser').value.trim();
-  var password = $('newUserPass').value.trim();
-  
-  if (!username || !password) {
-    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Username and password are required</div>';
-    return;
-  }
-  
-  api.post('/api/database/users', { username: username, password: password }).then(function(r) {
-    $('dbMsg').innerHTML = r.success ?
-      '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Database user created successfully!</div>' :
-      '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to create user') + '</div>';
-    
-    if (r.success) setTimeout(function() { loadDbUsers(); }, 1000);
-  });
-};
-
-window.deleteDbUser = function(username) {
-  if (confirm('Are you sure you want to delete the user "' + username + '"? This cannot be undone!')) {
-    api.del('/api/database/users/' + username).then(function() {
-      loadDbUsers();
-    });
-  }
-};
-
-window.showChangePasswordDialog = function(username) {
-  $('modalContainer').innerHTML = `
-    <div class="modal-backdrop">
-      <div class="modal">
-        <div class="modal-header">
-          <h3><i class="fas fa-key"></i> Change Password</h3>
-          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
-        </div>
-        <div class="modal-body">
-          <p>Change password for user: <strong>${esc(username)}</strong></p>
-          <div class="form-group">
-            <label for="newPassword">New Password</label>
-            <input type="password" id="newPassword" class="form-control">
-          </div>
-          <div id="passwordStatus" class="mt"></div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
-          <button class="btn btn-p" onclick="changeUserPassword('${esc(username)}')">
-            <i class="fas fa-save"></i> Change Password
-          </button>
-        </div>
-      </div>
-    </div>
-  `;
-};
-
-window.changeUserPassword = function(username) {
-  var password = $('newPassword').value.trim();
-  
-  if (!password) {
-    $('passwordStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Password is required</div>';
-    return;
-  }
-  
-  api.post('/api/database/user/password', { username: username, password: password }).then(function(r) {
-    $('passwordStatus').innerHTML = r.success ?
-      '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Password changed successfully!</div>' :
-      '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to change password') + '</div>';
-    
-    if (r.success) {
-      setTimeout(function() {
-        closeModal();
-      }, 1000);
-    }
-  });
-};
-
-window.assignDbPrivileges = function() {
-  var username = $('privUser').value.trim();
-  var dbname = $('privDb').value.trim();
-  
-  if (!username || !dbname) {
-    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please select both user and database</div>';
-    return;
-  }
-  
-  api.post('/api/database/assign', { username: username, dbname: dbname }).then(function(r) {
-    $('dbMsg').innerHTML = r.success ?
-      '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Privileges added successfully!</div>' :
-      '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to add privileges') + '</div>';
-    
-    if (r.success) setTimeout(function() { loadDbPrivileges(); }, 1000);
-  });
-};
-
-window.revokePrivilege = function(username, dbname) {
-  if (confirm('Remove privileges for user "' + username + '" on database "' + dbname + '"?')) {
-    // This would need a backend endpoint for revoking privileges
-    // For now, let's show a notification
-    showNotification('This feature requires additional backend support');
-  }
-};
+window.dropDb=function(btn){ var n=btn.dataset.db; if(confirm('DROP '+n+'?'))api.del('/api/databases/'+n).then(function(){loadPage('databases')}); };
 
 // Tunnel Page
 function pgTun(el) {

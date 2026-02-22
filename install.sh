@@ -2,7 +2,8 @@
 ############################################
 # LitePanel Installer v2.1 (Production)
 # Fresh Ubuntu 22.04 LTS Only
-# REVISED: Cloudflare Multi-Domain Management
+# REVISED: Fixed phpMyAdmin & Security Issues
+# UPDATED: White UI theme and cPanel-like file manager
 ############################################
 
 export DEBIAN_FRONTEND=noninteractive
@@ -48,7 +49,7 @@ clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
 echo "  ║   LitePanel Installer v2.1       ║"
-echo "  ║   Ubuntu 22.04 LTS               ║"
+echo "  ║   Ubuntu 22.04 LTS              ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2
@@ -465,7 +466,8 @@ cat > package.json <<'PKGEOF'
     "express-session": "^1.17.3",
     "bcryptjs": "^2.4.3",
     "multer": "^1.4.5-lts.1",
-    "axios": "^1.4.0"
+    "adm-zip": "^0.5.10",
+    "mime-types": "^2.1.35"
   }
 }
 PKGEOF
@@ -513,7 +515,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const multer = require('multer');
-const axios = require('axios'); // Untuk HTTP requests ke Cloudflare API
+const AdmZip = require('adm-zip');
+const mime = require('mime-types');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 let config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -522,9 +525,6 @@ const OLS_CONF = '/usr/local/lsws/conf/httpd_config.conf';
 const OLS_VHOST_CONF_DIR = '/usr/local/lsws/conf/vhosts';
 const OLS_VHOST_DIR = '/usr/local/lsws/vhosts';
 const MAX_EDIT_SIZE = 5 * 1024 * 1024;
-
-// Cloudflare API Config Path
-const CF_CONFIG_PATH = path.join(__dirname, 'cloudflare.json');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -550,6 +550,53 @@ function svcActive(name) {
 }
 function escRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function shellEsc(s) { return s.replace(/'/g, "'\\''"); }
+
+/* === File Operations === */
+function isTextFile(filePath, size) {
+  // Skip check for larger files to improve performance
+  if (size > 1024 * 1024) return false;
+  
+  try {
+    // Read first few KB to check for binary content
+    const fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(Math.min(size, 4096));
+    fs.readSync(fd, buffer, 0, buffer.length, 0);
+    fs.closeSync(fd);
+    
+    // Check for NUL bytes (common in binary files)
+    return !buffer.includes(0);
+  } catch (e) {
+    return false;
+  }
+}
+
+function compressFiles(sourcePaths, outputPath) {
+  try {
+    const zip = new AdmZip();
+    for (const sourcePath of sourcePaths) {
+      const stats = fs.statSync(sourcePath);
+      if (stats.isDirectory()) {
+        zip.addLocalFolder(sourcePath, path.basename(sourcePath));
+      } else {
+        zip.addLocalFile(sourcePath);
+      }
+    }
+    zip.writeZip(outputPath);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function extractArchive(archivePath, targetDir) {
+  try {
+    const zip = new AdmZip(archivePath);
+    zip.extractAllTo(targetDir, true);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 /* === OLS Config Management === */
 function readOLSConf() { return fs.readFileSync(OLS_CONF, 'utf8'); }
@@ -644,148 +691,6 @@ function safeRestartOLS() {
   } catch(e) { throw e; }
 }
 
-/* === CLOUDFLARE API INTEGRATION === */
-// Fungsi untuk load config Cloudflare
-function loadCloudflareConfig() {
-  try {
-    if (fs.existsSync(CF_CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(CF_CONFIG_PATH, 'utf8'));
-    }
-  } catch(e) {
-    console.error('Error loading Cloudflare config:', e.message);
-  }
-  return { apiToken: '', accountId: '', zones: {} };
-}
-
-// Fungsi untuk save config Cloudflare
-function saveCloudflareConfig(cfConfig) {
-  try {
-    fs.writeFileSync(CF_CONFIG_PATH, JSON.stringify(cfConfig, null, 2));
-    return true;
-  } catch(e) {
-    console.error('Error saving Cloudflare config:', e.message);
-    return false;
-  }
-}
-
-// Fungsi untuk request ke Cloudflare API
-async function cloudflareRequest(endpoint, method, data = null) {
-  const cfConfig = loadCloudflareConfig();
-  
-  if (!cfConfig.apiToken) {
-    throw new Error('API token not configured');
-  }
-
-  try {
-    const url = `https://api.cloudflare.com/client/v4${endpoint}`;
-    const headers = {
-      'Authorization': `Bearer ${cfConfig.apiToken}`,
-      'Content-Type': 'application/json'
-    };
-
-    const config = {
-      method,
-      url,
-      headers,
-      validateStatus: () => true // Don't throw on non-200 response
-    };
-
-    if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
-      config.data = data;
-    }
-
-    const response = await axios(config);
-    
-    if (!response.data.success) {
-      const error = response.data.errors && response.data.errors.length > 0
-        ? response.data.errors[0].message
-        : 'API request failed';
-      throw new Error(error);
-    }
-
-    return response.data.result;
-  } catch (error) {
-    if (error.response) {
-      throw new Error(`Cloudflare API error: ${error.response.data.errors[0]?.message || 'Unknown API error'}`);
-    }
-    throw error;
-  }
-}
-
-// Verifikasi token dan dapatkan account details
-async function verifyCloudflareToken(token) {
-  try {
-    // Verify token
-    const verifyResponse = await axios({
-      method: 'GET',
-      url: 'https://api.cloudflare.com/client/v4/user/tokens/verify',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      validateStatus: () => true
-    });
-
-    if (!verifyResponse.data.success) {
-      throw new Error('Invalid API token');
-    }
-
-    // Get accounts
-    const accountsResponse = await axios({
-      method: 'GET',
-      url: 'https://api.cloudflare.com/client/v4/accounts',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      validateStatus: () => true
-    });
-
-    if (!accountsResponse.data.success || !accountsResponse.data.result.length) {
-      throw new Error('No accounts found with this token');
-    }
-
-    return accountsResponse.data.result[0];
-  } catch (error) {
-    if (error.response) {
-      throw new Error(`Cloudflare API error: ${error.response.data.errors[0]?.message || 'Unknown API error'}`);
-    }
-    throw error;
-  }
-}
-
-// Fungsi fallback jika axios tidak tersedia (menggunakan curl)
-function cloudflareRequestCurl(endpoint, method, data = null) {
-  const cfConfig = loadCloudflareConfig();
-  
-  if (!cfConfig.apiToken) {
-    throw new Error('API token not configured');
-  }
-
-  let cmd = `curl -s -X ${method} "https://api.cloudflare.com/client/v4${endpoint}" ` +
-            `-H "Authorization: Bearer ${cfConfig.apiToken}" ` +
-            `-H "Content-Type: application/json"`;
-  
-  if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
-    cmd += ` -d '${JSON.stringify(data)}'`;
-  }
-
-  try {
-    const result = JSON.parse(run(cmd, 30000));
-    
-    if (!result.success) {
-      const error = result.errors && result.errors.length > 0 
-        ? result.errors[0].message 
-        : 'API request failed';
-      throw new Error(error);
-    }
-    
-    return result.result;
-  } catch (e) {
-    throw new Error(`Cloudflare API error: ${e.message}`);
-  }
-}
-
 /* === Auth === */
 app.post('/api/login', function(req, res) {
   var u = req.body.username, p = req.body.password;
@@ -832,48 +737,251 @@ app.get('/api/files', auth, function(req, res) {
       fs.readdirSync(p).forEach(function(name) {
         try {
           var s = fs.statSync(path.join(p, name));
-          items.push({ name: name, isDir: s.isDirectory(), size: s.size, modified: s.mtime,
-            perms: '0' + (s.mode & parseInt('777', 8)).toString(8) });
+          items.push({ 
+            name: name, 
+            isDir: s.isDirectory(), 
+            size: s.size, 
+            modified: s.mtime,
+            perms: '0' + (s.mode & parseInt('777', 8)).toString(8),
+            extension: path.extname(name).toLowerCase().substring(1)
+          });
         } catch(e) { items.push({ name: name, isDir: false, size: 0, error: true }); }
       });
       res.json({ path: p, items: items });
     } else {
       if (stat.size > MAX_EDIT_SIZE) return res.json({ path: p, size: stat.size, tooLarge: true });
-      var buf = Buffer.alloc(Math.min(512, stat.size));
-      if (stat.size > 0) { var fd = fs.openSync(p, 'r'); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd); }
-      if (buf.includes(0)) return res.json({ path: p, size: stat.size, binary: true });
-      res.json({ path: p, content: fs.readFileSync(p, 'utf8'), size: stat.size });
+      
+      const isText = isTextFile(p, stat.size);
+      if (!isText) return res.json({ path: p, size: stat.size, binary: true });
+      
+      res.json({ 
+        path: p, 
+        content: fs.readFileSync(p, 'utf8'), 
+        size: stat.size,
+        extension: path.extname(p).toLowerCase().substring(1)
+      });
     }
   } catch(e) { res.status(404).json({ error: e.message }); }
 });
+
 app.put('/api/files', auth, function(req, res) {
   try { fs.writeFileSync(req.body.filePath, req.body.content); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.delete('/api/files', auth, function(req, res) {
   var target = req.query.path;
   if (!target || target === '/') return res.status(400).json({ error: 'Cannot delete root' });
   try { fs.rmSync(target, { recursive: true, force: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// File upload handler
 var upload = multer({ dest: '/tmp/uploads/' });
-app.post('/api/files/upload', auth, upload.single('file'), function(req, res) {
-  try { fs.renameSync(req.file.path, path.join(req.body.path || '/tmp', req.file.originalname)); res.json({ success: true }); }
-  catch(e) { res.status(500).json({ error: e.message }); }
+app.post('/api/files/upload', auth, upload.array('files'), function(req, res) {
+  try {
+    const targetPath = req.body.path || '/tmp';
+    const results = [];
+    
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files were uploaded' });
+    }
+    
+    for (const file of req.files) {
+      const destination = path.join(targetPath, file.originalname);
+      fs.renameSync(file.path, destination);
+      results.push({ 
+        name: file.originalname, 
+        size: file.size, 
+        path: destination,
+        success: true 
+      });
+    }
+    
+    res.json({ success: true, files: results });
+  } catch(e) { 
+    res.status(500).json({ error: e.message }); 
+  }
 });
+
 app.post('/api/files/mkdir', auth, function(req, res) {
   try { fs.mkdirSync(req.body.path, { recursive: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/api/files/rename', auth, function(req, res) {
   try { fs.renameSync(req.body.oldPath, req.body.newPath); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
+
 app.get('/api/files/download', auth, function(req, res) {
   var fp = req.query.path;
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
-  try { if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); res.download(fp); }
+  try { 
+    if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); 
+    
+    // Set appropriate content type
+    const contentType = mime.lookup(fp) || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    
+    // Set content disposition
+    res.setHeader('Content-Disposition', 'attachment; filename=' + path.basename(fp));
+    
+    // Stream the file
+    fs.createReadStream(fp).pipe(res);
+  }
   catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// New archive/compress endpoint
+app.post('/api/files/compress', auth, function(req, res) {
+  try {
+    const sourcePaths = req.body.paths;
+    const outputPath = req.body.output;
+    
+    if (!Array.isArray(sourcePaths) || sourcePaths.length === 0 || !outputPath) {
+      return res.status(400).json({ error: 'Invalid parameters' });
+    }
+    
+    // Validate all paths exist
+    for (const p of sourcePaths) {
+      if (!fs.existsSync(p)) {
+        return res.status(404).json({ error: `Path not found: ${p}` });
+      }
+    }
+    
+    // Ensure output path ends with .zip
+    const finalOutput = outputPath.endsWith('.zip') ? outputPath : outputPath + '.zip';
+    
+    // Create zip file
+    const success = compressFiles(sourcePaths, finalOutput);
+    
+    if (success) {
+      res.json({ success: true, path: finalOutput });
+    } else {
+      res.status(500).json({ error: 'Failed to create archive' });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// New extract endpoint
+app.post('/api/files/extract', auth, function(req, res) {
+  try {
+    const archivePath = req.body.archive;
+    const targetDir = req.body.target;
+    
+    if (!archivePath || !targetDir) {
+      return res.status(400).json({ error: 'Invalid parameters' });
+    }
+    
+    if (!fs.existsSync(archivePath)) {
+      return res.status(404).json({ error: 'Archive not found' });
+    }
+    
+    // Create target directory if it doesn't exist
+    fs.mkdirSync(targetDir, { recursive: true });
+    
+    // Extract archive
+    const success = extractArchive(archivePath, targetDir);
+    
+    if (success) {
+      res.json({ success: true, path: targetDir });
+    } else {
+      res.status(500).json({ error: 'Failed to extract archive' });
+    }
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// New endpoint for getting file permissions
+app.get('/api/files/permissions', auth, function(req, res) {
+  var p = req.query.path;
+  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Not found' });
+  
+  try {
+    const stats = fs.statSync(p);
+    const permissions = '0' + (stats.mode & parseInt('777', 8)).toString(8);
+    
+    // Get owner and group
+    const owner = run(`stat -c "%U" "${shellEsc(p)}"`) || 'unknown';
+    const group = run(`stat -c "%G" "${shellEsc(p)}"`) || 'unknown';
+    
+    res.json({ 
+      permissions,
+      owner,
+      group,
+      isDir: stats.isDirectory()
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Endpoint for changing permissions
+app.post('/api/files/permissions', auth, function(req, res) {
+  try {
+    const filePath = req.body.path;
+    const permissions = req.body.permissions;
+    const recursive = req.body.recursive === true;
+    
+    if (!filePath || !permissions || !fs.existsSync(filePath)) {
+      return res.status(400).json({ error: 'Invalid parameters' });
+    }
+    
+    // Validate permissions format (0755, 755, etc.)
+    const permRegex = /^(0)?[0-7]{3,4}$/;
+    if (!permRegex.test(permissions)) {
+      return res.status(400).json({ error: 'Invalid permission format' });
+    }
+    
+    // Convert to octal if needed
+    const octalPerms = permissions.startsWith('0') ? 
+      parseInt(permissions, 8) : 
+      parseInt('0' + permissions, 8);
+    
+    const cmd = recursive ? 
+      `chmod -R ${octalPerms.toString(8)} "${shellEsc(filePath)}"` : 
+      `chmod ${octalPerms.toString(8)} "${shellEsc(filePath)}"`;
+    
+    run(cmd);
+    
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Endpoint for creating new file
+app.post('/api/files/newfile', auth, function(req, res) {
+  try {
+    const filePath = req.body.path;
+    const content = req.body.content || '';
+    
+    if (!filePath) {
+      return res.status(400).json({ error: 'Path is required' });
+    }
+    
+    // Check if file already exists
+    if (fs.existsSync(filePath)) {
+      return res.status(400).json({ error: 'File already exists' });
+    }
+    
+    // Create parent directory if needed
+    const dirPath = path.dirname(filePath);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+    
+    // Write file
+    fs.writeFileSync(filePath, content);
+    
+    res.json({ success: true, path: filePath });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /* === Domains === */
@@ -939,315 +1047,6 @@ app.delete('/api/databases/:name', auth, function(req, res) {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-/* === CLOUDFLARE MANAGEMENT ENDPOINTS === */
-// Get Cloudflare config status
-app.get('/api/cloudflare/config', auth, function(req, res) {
-  try {
-    const cfConfig = loadCloudflareConfig();
-    res.json({ 
-      configured: !!cfConfig.apiToken,
-      accountId: cfConfig.accountId,
-      accountName: cfConfig.accountName,
-      email: cfConfig.email,
-      tokenMask: cfConfig.apiToken ? 
-        cfConfig.apiToken.substring(0, 4) + '...' + cfConfig.apiToken.substring(cfConfig.apiToken.length - 4) : ''
-    });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Set Cloudflare API config
-app.post('/api/cloudflare/config', auth, async function(req, res) {
-  try {
-    const { token, email } = req.body;
-    
-    // If empty token, remove config
-    if (!token) {
-      saveCloudflareConfig({ apiToken: '', accountId: '', accountName: '', email: '', zones: {} });
-      return res.json({ success: true, message: 'Cloudflare configuration reset' });
-    }
-    
-    // Verify token and get account info
-    const account = await verifyCloudflareToken(token);
-    
-    // Save configuration
-    const cfConfig = { 
-      apiToken: token, 
-      accountId: account.id,
-      accountName: account.name,
-      email: email || '',
-      zones: {}
-    };
-    
-    saveCloudflareConfig(cfConfig);
-    res.json({ 
-      success: true, 
-      account: { 
-        id: account.id, 
-        name: account.name 
-      }
-    });
-  } catch(e) {
-    console.error('Error configuring Cloudflare:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Get all zones (domains)
-app.get('/api/cloudflare/zones', auth, async function(req, res) {
-  try {
-    let result;
-    
-    try {
-      // Try using axios first
-      result = await cloudflareRequest('/zones?per_page=50', 'GET');
-    } catch (axiosError) {
-      // Fallback to curl if axios fails
-      console.log('Axios request failed, falling back to curl:', axiosError.message);
-      result = cloudflareRequestCurl('/zones?per_page=50', 'GET');
-    }
-    
-    // Map result to a simpler structure
-    const zones = result.map(zone => ({
-      id: zone.id,
-      name: zone.name,
-      status: zone.status,
-      nameServers: zone.name_servers || [],
-      originalNameServers: zone.original_name_servers || [],
-      paused: !!zone.paused
-    }));
-    
-    // Update the stored zone information in our config
-    const cfConfig = loadCloudflareConfig();
-    zones.forEach(zone => {
-      cfConfig.zones[zone.name] = { id: zone.id };
-    });
-    saveCloudflareConfig(cfConfig);
-    
-    res.json(zones);
-  } catch(e) {
-    console.error('Error getting Cloudflare zones:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Get single zone details
-app.get('/api/cloudflare/zones/:id', auth, async function(req, res) {
-  try {
-    let result;
-    try {
-      result = await cloudflareRequest(`/zones/${req.params.id}`, 'GET');
-    } catch (axiosError) {
-      result = cloudflareRequestCurl(`/zones/${req.params.id}`, 'GET');
-    }
-    res.json(result);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Get DNS records for a zone
-app.get('/api/cloudflare/zones/:id/dns', auth, async function(req, res) {
-  try {
-    let result;
-    try {
-      result = await cloudflareRequest(`/zones/${req.params.id}/dns_records?per_page=100`, 'GET');
-    } catch (axiosError) {
-      result = cloudflareRequestCurl(`/zones/${req.params.id}/dns_records?per_page=100`, 'GET');
-    }
-    res.json(result);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Add a new zone (domain)
-app.post('/api/cloudflare/zones', auth, async function(req, res) {
-  try {
-    const domain = req.body.domain;
-    
-    if (!domain || !/^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
-      return res.status(400).json({ error: 'Invalid domain name' });
-    }
-    
-    const cfConfig = loadCloudflareConfig();
-    if (!cfConfig.apiToken || !cfConfig.accountId) {
-      return res.status(400).json({ error: 'Cloudflare API not configured' });
-    }
-
-    // Add domain to Cloudflare
-    let result;
-    try {
-      result = await cloudflareRequest('/zones', 'POST', {
-        name: domain,
-        account: { id: cfConfig.accountId },
-        jump_start: true
-      });
-    } catch (axiosError) {
-      result = cloudflareRequestCurl('/zones', 'POST', {
-        name: domain,
-        account: { id: cfConfig.accountId },
-        jump_start: true
-      });
-    }
-    
-    // Save zone info to our config
-    cfConfig.zones[domain] = { id: result.id };
-    saveCloudflareConfig(cfConfig);
-    
-    // Create vhost if requested
-    if (req.body.createVhost) {
-      try {
-        const docRoot = createVhostFiles(domain);
-        addDomainToOLS(domain);
-        safeRestartOLS();
-      } catch (e) {
-        console.error('Error creating local vhost:', e);
-      }
-    }
-    
-    res.json({
-      success: true,
-      zone: {
-        id: result.id,
-        name: result.name,
-        status: result.status,
-        nameServers: result.name_servers || []
-      }
-    });
-  } catch(e) {
-    console.error('Error adding Cloudflare zone:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Delete a zone
-app.delete('/api/cloudflare/zones/:id', auth, async function(req, res) {
-  try {
-    const zoneId = req.params.id;
-    
-    // Get zone details first to get the domain name
-    let zoneInfo;
-    try {
-      try {
-        zoneInfo = await cloudflareRequest(`/zones/${zoneId}`, 'GET');
-      } catch (axiosError) {
-        zoneInfo = cloudflareRequestCurl(`/zones/${zoneId}`, 'GET');
-      }
-    } catch (e) {
-      // If zone doesn't exist in Cloudflare, it might already be deleted
-      console.log('Zone info not found, may already be deleted:', e.message);
-    }
-    
-    // Delete from Cloudflare
-    try {
-      try {
-        await cloudflareRequest(`/zones/${zoneId}`, 'DELETE');
-      } catch (axiosError) {
-        cloudflareRequestCurl(`/zones/${zoneId}`, 'DELETE');
-      }
-    } catch (e) {
-      console.log('Error deleting zone from Cloudflare:', e.message);
-      // Continue with local cleanup even if Cloudflare deletion fails
-    }
-    
-    // Remove from our config
-    const cfConfig = loadCloudflareConfig();
-    if (zoneInfo && zoneInfo.name) {
-      delete cfConfig.zones[zoneInfo.name];
-      
-      // Also remove local vhost if it exists
-      try {
-        removeDomainFromOLS(zoneInfo.name);
-        fs.rmSync(path.join(OLS_VHOST_CONF_DIR, zoneInfo.name), { recursive: true, force: true });
-        safeRestartOLS();
-      } catch (e) {
-        console.error('Error removing local vhost:', e);
-      }
-    }
-    saveCloudflareConfig(cfConfig);
-    
-    res.json({ success: true });
-  } catch(e) {
-    console.error('Error deleting Cloudflare zone:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Add DNS record
-app.post('/api/cloudflare/zones/:id/dns', auth, async function(req, res) {
-  try {
-    const zoneId = req.params.id;
-    const record = req.body;
-    
-    if (!record.type || !record.name || (record.type !== 'MX' && !record.content)) {
-      return res.status(400).json({ error: 'Invalid DNS record data' });
-    }
-    
-    let result;
-    try {
-      result = await cloudflareRequest(`/zones/${zoneId}/dns_records`, 'POST', record);
-    } catch (axiosError) {
-      result = cloudflareRequestCurl(`/zones/${zoneId}/dns_records`, 'POST', record);
-    }
-    
-    res.json({ success: true, record: result });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Update DNS record
-app.put('/api/cloudflare/zones/:zoneId/dns/:recordId', auth, async function(req, res) {
-  try {
-    const zoneId = req.params.zoneId;
-    const recordId = req.params.recordId;
-    const record = req.body;
-    
-    if (!record.type || !record.name || (record.type !== 'MX' && !record.content)) {
-      return res.status(400).json({ error: 'Invalid DNS record data' });
-    }
-    
-    let result;
-    try {
-      result = await cloudflareRequest(
-        `/zones/${zoneId}/dns_records/${recordId}`, 
-        'PUT', 
-        record
-      );
-    } catch (axiosError) {
-      result = cloudflareRequestCurl(
-        `/zones/${zoneId}/dns_records/${recordId}`, 
-        'PUT', 
-        record
-      );
-    }
-    
-    res.json({ success: true, record: result });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Delete DNS record
-app.delete('/api/cloudflare/zones/:zoneId/dns/:recordId', auth, async function(req, res) {
-  try {
-    const zoneId = req.params.zoneId;
-    const recordId = req.params.recordId;
-    
-    try {
-      await cloudflareRequest(`/zones/${zoneId}/dns_records/${recordId}`, 'DELETE');
-    } catch (axiosError) {
-      cloudflareRequestCurl(`/zones/${zoneId}/dns_records/${recordId}`, 'DELETE');
-    }
-    
-    res.json({ success: true });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 /* === Tunnel === */
 app.get('/api/tunnel/status', auth, function(req, res) { res.json({ active: svcActive('cloudflared') }); });
 app.post('/api/tunnel/setup', auth, function(req, res) {
@@ -1295,12 +1094,13 @@ cat > public/index.html <<'HTMLEOF'
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>LitePanel</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.1.1/css/all.min.css">
 <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
 <div id="loginPage" class="login-page">
   <div class="login-box">
-    <h1>🖥️ LitePanel</h1>
+    <h1><i class="fas fa-server"></i> LitePanel</h1>
     <form id="loginForm">
       <input type="text" id="username" placeholder="Username" required>
       <input type="password" id="password" placeholder="Password" required>
@@ -1310,21 +1110,20 @@ cat > public/index.html <<'HTMLEOF'
   </div>
 </div>
 <div id="mainPanel" class="main-panel" style="display:none">
-  <button id="mobileToggle" class="mobile-toggle">☰</button>
+  <button id="mobileToggle" class="mobile-toggle"><i class="fas fa-bars"></i></button>
   <aside class="sidebar" id="sidebar">
-    <div class="logo">🖥️ LitePanel</div>
+    <div class="logo"><i class="fas fa-server"></i> LitePanel</div>
     <nav>
-      <a href="#" data-page="dashboard" class="active">📊 Dashboard</a>
-      <a href="#" data-page="services">⚙️ Services</a>
-      <a href="#" data-page="files">📁 Files</a>
-      <a href="#" data-page="domains">🌐 Domains</a>
-      <a href="#" data-page="cloudflare">☁️ Cloudflare</a>
-      <a href="#" data-page="databases">🗃️ Databases</a>
-      <a href="#" data-page="tunnel">☁️ Tunnel</a>
-      <a href="#" data-page="terminal">💻 Terminal</a>
-      <a href="#" data-page="settings">🔧 Settings</a>
+      <a href="#" data-page="dashboard" class="active"><i class="fas fa-tachometer-alt"></i> Dashboard</a>
+      <a href="#" data-page="services"><i class="fas fa-cogs"></i> Services</a>
+      <a href="#" data-page="files"><i class="fas fa-folder"></i> File Manager</a>
+      <a href="#" data-page="domains"><i class="fas fa-globe"></i> Domains</a>
+      <a href="#" data-page="databases"><i class="fas fa-database"></i> Databases</a>
+      <a href="#" data-page="tunnel"><i class="fas fa-cloud"></i> Tunnel</a>
+      <a href="#" data-page="terminal"><i class="fas fa-terminal"></i> Terminal</a>
+      <a href="#" data-page="settings"><i class="fas fa-sliders-h"></i> Settings</a>
     </nav>
-    <a href="#" id="logoutBtn" class="logout-btn">🚪 Logout</a>
+    <a href="#" id="logoutBtn" class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</a>
   </aside>
   <main class="content" id="content"></main>
 </div>
@@ -1337,91 +1136,743 @@ HTMLEOF
 # -------- public/css/style.css --------
 ##############################################
 cat > public/css/style.css <<'CSSEOF'
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1d23;color:#e0e0e0}
-.login-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#0f1117,#1a1d23)}
-.login-box{background:#2a2d35;padding:40px;border-radius:12px;width:360px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
-.login-box h1{text-align:center;color:#4f8cff;margin-bottom:30px;font-size:28px}
-.login-box input{width:100%;padding:12px 16px;margin-bottom:16px;background:#1a1d23;border:1px solid #3a3d45;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none}
-.login-box input:focus{border-color:#4f8cff}
-.login-box button{width:100%;padding:12px;background:#4f8cff;border:none;border-radius:8px;color:#fff;font-size:16px;cursor:pointer;font-weight:600}
-.login-box button:hover{background:#3a7ae0}
-.error{color:#e74c3c;text-align:center;margin-top:10px;font-size:14px}
-.main-panel{display:flex;min-height:100vh}
-.sidebar{width:220px;background:#12141a;display:flex;flex-direction:column;position:fixed;height:100vh;z-index:10;transition:transform .3s}
-.sidebar .logo{padding:20px;font-size:20px;font-weight:700;color:#4f8cff;border-bottom:1px solid #2a2d35}
-.sidebar nav{flex:1;padding:10px 0;overflow-y:auto}
-.sidebar nav a{display:block;padding:12px 20px;color:#8a8d93;text-decoration:none;transition:.2s;font-size:14px}
-.sidebar nav a:hover,.sidebar nav a.active{background:#1a1d23;color:#4f8cff;border-right:3px solid #4f8cff}
-.logout-btn{padding:15px 20px;color:#e74c3c;text-decoration:none;border-top:1px solid #2a2d35;font-size:14px}
-.content{flex:1;margin-left:220px;padding:30px;min-height:100vh}
-.mobile-toggle{display:none;position:fixed;top:10px;left:10px;z-index:20;background:#2a2d35;border:none;color:#e0e0e0;font-size:24px;padding:8px 12px;border-radius:8px;cursor:pointer}
-@media(max-width:768px){
-  .mobile-toggle{display:block}
-  .sidebar{transform:translateX(-100%)}
-  .sidebar.open{transform:translateX(0)}
-  .content{margin-left:0;padding:15px;padding-top:55px}
-  .stats-grid{grid-template-columns:1fr!important}
-  .flex-row{flex-direction:column}
+/* Modern White Theme for LitePanel */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+  background: #f5f7fa;
+  color: #333;
+  line-height: 1.5;
 }
-.page-title{font-size:24px;margin-bottom:8px}
-.page-sub{color:#8a8d93;margin-bottom:25px;font-size:14px}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:25px}
-.card{background:#2a2d35;padding:20px;border-radius:10px}
-.card .label{font-size:12px;color:#8a8d93;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
-.card .value{font-size:22px;font-weight:700;color:#4f8cff}
-.card .sub{font-size:12px;color:#6a6d73;margin-top:4px}
-.progress{background:#1a1d23;border-radius:8px;height:8px;margin-top:8px;overflow:hidden}
-.progress-bar{height:100%;border-radius:8px;background:#4f8cff;transition:width .3s}
-.progress-bar.warn{background:#f39c12}
-.progress-bar.danger{background:#e74c3c}
-table.tbl{width:100%;border-collapse:collapse;background:#2a2d35;border-radius:10px;overflow:hidden}
-.tbl th{background:#1a1d23;padding:12px 16px;text-align:left;font-size:12px;color:#8a8d93;text-transform:uppercase}
-.tbl td{padding:12px 16px;border-bottom:1px solid #1a1d23;font-size:14px}
-.btn{padding:7px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;transition:.2s;display:inline-block;text-decoration:none}
-.btn:hover{opacity:.85}
-.btn-p{background:#4f8cff;color:#fff}
-.btn-s{background:#2ecc71;color:#fff}
-.btn-d{background:#e74c3c;color:#fff}
-.btn-w{background:#f39c12;color:#fff}
-.btn-sm{padding:4px 10px;font-size:12px}
-.badge{padding:4px 10px;border-radius:12px;font-size:12px;font-weight:600}
-.badge-on{background:rgba(46,204,113,.15);color:#2ecc71}
-.badge-off{background:rgba(231,76,60,.15);color:#e74c3c}
-.form-control{width:100%;padding:10px 14px;background:#1a1d23;border:1px solid #3a3d45;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none}
-.form-control:focus{border-color:#4f8cff}
-textarea.form-control{min-height:300px;font-family:'Courier New',monospace;font-size:13px;resize:vertical}
-.alert{padding:12px 16px;border-radius:8px;margin-bottom:16px;font-size:14px}
-.alert-ok{background:rgba(46,204,113,.1);border:1px solid #2ecc71;color:#2ecc71}
-.alert-err{background:rgba(231,76,60,.1);border:1px solid #e74c3c;color:#e74c3c}
-.breadcrumb{display:flex;gap:5px;margin-bottom:15px;flex-wrap:wrap;font-size:14px}
-.breadcrumb a{color:#4f8cff;text-decoration:none;cursor:pointer}
-.breadcrumb span{color:#6a6d73}
-.file-item{display:flex;align-items:center;padding:10px 16px;background:#2a2d35;margin-bottom:2px;cursor:pointer;border-radius:4px;font-size:14px}
-.file-item:hover{background:#32353d}
-.file-item .icon{margin-right:10px;font-size:16px}
-.file-item .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.file-item .size{color:#8a8d93;margin-right:10px;min-width:70px;text-align:right;font-size:13px}
-.file-item .perms{color:#6a6d73;margin-right:10px;font-family:monospace;font-size:12px}
-.file-actions{display:flex;gap:4px}
-.terminal-box{background:#0d0d0d;color:#0f0;font-family:'Courier New',monospace;padding:20px;border-radius:10px;min-height:350px;max-height:500px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:13px}
-.term-input{display:flex;gap:10px;margin-top:10px}
-.term-input input{flex:1;background:#0d0d0d;border:1px solid #333;color:#0f0;font-family:'Courier New',monospace;padding:10px;border-radius:6px;outline:none}
-.flex-row{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:16px}
-.mt{margin-top:16px}.mb{margin-bottom:16px}
 
-/* Modal Styles for Cloudflare DNS Management */
-.modal { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); display:flex; align-items:center; justify-content:center; z-index:1000; }
-.modal-content { background:#2a2d35; padding:25px; border-radius:12px; width:500px; max-width:90%; }
-.modal-title { margin-bottom:20px; font-size:18px; }
-.modal-footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
-.modal label { font-size:12px; color:#8a8d93; display:block; margin-bottom:6px; }
+/* Login Page */
+.login-page { 
+  display: flex; 
+  align-items: center; 
+  justify-content: center; 
+  min-height: 100vh; 
+  background: linear-gradient(135deg, #f5f7fa, #e4e7eb);
+}
+.login-box { 
+  background: #fff; 
+  padding: 40px; 
+  border-radius: 12px; 
+  width: 360px; 
+  box-shadow: 0 8px 30px rgba(0,0,0,0.1);
+}
+.login-box h1 { 
+  text-align: center; 
+  color: #4a89dc; 
+  margin-bottom: 30px; 
+  font-size: 28px;
+}
+.login-box input { 
+  width: 100%; 
+  padding: 12px 16px; 
+  margin-bottom: 16px; 
+  background: #f5f7fa; 
+  border: 1px solid #e4e7eb; 
+  border-radius: 8px; 
+  color: #333; 
+  font-size: 14px; 
+  outline: none;
+}
+.login-box input:focus { 
+  border-color: #4a89dc; 
+  box-shadow: 0 0 0 2px rgba(74,137,220,0.2);
+}
+.login-box button { 
+  width: 100%; 
+  padding: 12px; 
+  background: #4a89dc; 
+  border: none; 
+  border-radius: 8px; 
+  color: #fff; 
+  font-size: 16px; 
+  cursor: pointer; 
+  font-weight: 600;
+  transition: background 0.3s;
+}
+.login-box button:hover { 
+  background: #3a7bd5;
+}
+.error { 
+  color: #e74c3c; 
+  text-align: center; 
+  margin-top: 10px; 
+  font-size: 14px;
+}
+
+/* Main Layout */
+.main-panel { 
+  display: flex; 
+  min-height: 100vh;
+}
+.sidebar { 
+  width: 240px; 
+  background: #fff; 
+  display: flex; 
+  flex-direction: column; 
+  position: fixed; 
+  height: 100vh; 
+  z-index: 10; 
+  transition: transform .3s;
+  box-shadow: 0 0 20px rgba(0,0,0,0.05);
+}
+.sidebar .logo { 
+  padding: 20px; 
+  font-size: 20px; 
+  font-weight: 700; 
+  color: #4a89dc; 
+  border-bottom: 1px solid #eee;
+}
+.sidebar nav { 
+  flex: 1; 
+  padding: 10px 0; 
+  overflow-y: auto;
+}
+.sidebar nav a { 
+  display: flex; 
+  align-items: center;
+  padding: 12px 20px; 
+  color: #606060; 
+  text-decoration: none; 
+  transition: .2s; 
+  font-size: 14px;
+}
+.sidebar nav a i {
+  margin-right: 10px;
+  width: 20px;
+  text-align: center;
+}
+.sidebar nav a:hover, .sidebar nav a.active { 
+  background: #f0f4f8; 
+  color: #4a89dc; 
+  border-left: 3px solid #4a89dc;
+}
+.logout-btn { 
+  padding: 15px 20px; 
+  color: #e74c3c; 
+  text-decoration: none; 
+  border-top: 1px solid #eee; 
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+}
+.logout-btn i {
+  margin-right: 10px;
+  width: 20px;
+  text-align: center;
+}
+.content { 
+  flex: 1; 
+  margin-left: 240px; 
+  padding: 30px; 
+  min-height: 100vh;
+}
+.mobile-toggle { 
+  display: none; 
+  position: fixed; 
+  top: 10px; 
+  left: 10px; 
+  z-index: 20; 
+  background: #fff; 
+  border: none; 
+  color: #4a89dc; 
+  font-size: 20px; 
+  padding: 8px 12px; 
+  border-radius: 8px; 
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+@media(max-width:768px) {
+  .mobile-toggle { display: block; }
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .content { margin-left: 0; padding: 15px; padding-top: 55px; }
+  .stats-grid { grid-template-columns: 1fr !important; }
+  .flex-row { flex-direction: column; }
+}
+
+/* Page Elements */
+.page-title { 
+  font-size: 24px; 
+  margin-bottom: 8px;
+  color: #2c3e50;
+}
+.page-sub { 
+  color: #7f8c8d; 
+  margin-bottom: 25px; 
+  font-size: 14px;
+}
+.stats-grid { 
+  display: grid; 
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+  gap: 16px; 
+  margin-bottom: 25px;
+}
+.card { 
+  background: #fff; 
+  padding: 20px; 
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+.card .label { 
+  font-size: 12px; 
+  color: #95a5a6; 
+  margin-bottom: 6px; 
+  text-transform: uppercase; 
+  letter-spacing: .5px;
+}
+.card .value { 
+  font-size: 22px; 
+  font-weight: 700; 
+  color: #4a89dc;
+}
+.card .sub { 
+  font-size: 12px; 
+  color: #7f8c8d; 
+  margin-top: 4px;
+}
+.progress { 
+  background: #ecf0f1; 
+  border-radius: 8px; 
+  height: 8px; 
+  margin-top: 8px; 
+  overflow: hidden;
+}
+.progress-bar { 
+  height: 100%; 
+  border-radius: 8px; 
+  background: #4a89dc; 
+  transition: width .3s;
+}
+.progress-bar.warn { background: #f39c12; }
+.progress-bar.danger { background: #e74c3c; }
+
+/* Tables */
+table.tbl { 
+  width: 100%; 
+  border-collapse: collapse; 
+  background: #fff; 
+  border-radius: 10px; 
+  overflow: hidden;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+.tbl th { 
+  background: #f8f9fa; 
+  padding: 12px 16px; 
+  text-align: left; 
+  font-size: 12px; 
+  color: #7f8c8d; 
+  text-transform: uppercase;
+  font-weight: 600;
+  border-bottom: 1px solid #ecf0f1;
+}
+.tbl td { 
+  padding: 12px 16px; 
+  border-bottom: 1px solid #ecf0f1; 
+  font-size: 14px;
+  color: #34495e;
+}
+.tbl tr:last-child td {
+  border-bottom: none;
+}
+.tbl tr:hover td {
+  background: #f8f9fa;
+}
+
+/* Buttons */
+.btn { 
+  padding: 8px 16px; 
+  border: none; 
+  border-radius: 6px; 
+  cursor: pointer; 
+  font-size: 14px; 
+  font-weight: 500; 
+  transition: .2s; 
+  display: inline-block; 
+  text-decoration: none;
+  text-align: center;
+}
+.btn:hover { opacity: .9; }
+.btn-p { background: #4a89dc; color: #fff; }
+.btn-s { background: #2ecc71; color: #fff; }
+.btn-d { background: #e74c3c; color: #fff; }
+.btn-w { background: #f39c12; color: #fff; }
+.btn-l { background: #ecf0f1; color: #7f8c8d; }
+.btn-sm { 
+  padding: 4px 10px; 
+  font-size: 12px;
+}
+.btn i {
+  margin-right: 4px;
+}
+
+/* Badges */
+.badge { 
+  padding: 4px 10px; 
+  border-radius: 12px; 
+  font-size: 12px; 
+  font-weight: 600;
+  display: inline-block;
+}
+.badge-on { 
+  background: rgba(46,204,113,0.15); 
+  color: #2ecc71;
+}
+.badge-off { 
+  background: rgba(231,76,60,0.15); 
+  color: #e74c3c;
+}
+
+/* Forms */
+.form-control { 
+  width: 100%; 
+  padding: 10px 14px; 
+  background: #f8f9fa; 
+  border: 1px solid #e4e7eb; 
+  border-radius: 8px; 
+  color: #34495e; 
+  font-size: 14px; 
+  outline: none;
+  transition: all 0.2s;
+}
+.form-control:focus { 
+  border-color: #4a89dc; 
+  box-shadow: 0 0 0 2px rgba(74,137,220,0.2);
+}
+textarea.form-control { 
+  min-height: 300px; 
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-size: 13px; 
+  resize: vertical;
+}
+.form-group {
+  margin-bottom: 16px;
+}
+.form-group label {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 8px;
+  color: #34495e;
+}
+
+/* Alerts */
+.alert { 
+  padding: 12px 16px; 
+  border-radius: 8px; 
+  margin-bottom: 16px; 
+  font-size: 14px;
+}
+.alert-ok { 
+  background: rgba(46,204,113,0.1); 
+  border: 1px solid #2ecc71; 
+  color: #2ecc71;
+}
+.alert-err { 
+  background: rgba(231,76,60,0.1); 
+  border: 1px solid #e74c3c; 
+  color: #e74c3c;
+}
+.alert i {
+  margin-right: 8px;
+}
+
+/* Breadcrumbs */
+.breadcrumb { 
+  display: flex; 
+  gap: 5px; 
+  margin-bottom: 15px; 
+  flex-wrap: wrap; 
+  font-size: 14px;
+}
+.breadcrumb a { 
+  color: #4a89dc; 
+  text-decoration: none; 
+  cursor: pointer;
+}
+.breadcrumb span { color: #7f8c8d; }
+
+/* File Manager Styles */
+.file-manager {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 160px);
+  min-height: 400px;
+}
+
+.file-toolbar {
+  padding: 10px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #ecf0f1;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.file-container {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
+
+.file-item { 
+  display: flex; 
+  align-items: center; 
+  padding: 10px 16px; 
+  border-bottom: 1px solid #ecf0f1;
+  cursor: pointer; 
+  font-size: 14px;
+  color: #34495e;
+  user-select: none;
+  transition: background 0.2s;
+}
+.file-item:hover { background: #f8f9fa; }
+.file-item.selected { background: #e3f2fd; }
+.file-item .icon { 
+  margin-right: 10px; 
+  font-size: 16px;
+  width: 24px;
+  text-align: center;
+  color: #7f8c8d;
+}
+.file-item .icon.folder { color: #f39c12; }
+.file-item .icon.image { color: #3498db; }
+.file-item .icon.code { color: #2ecc71; }
+.file-item .icon.archive { color: #9b59b6; }
+.file-item .name { 
+  flex: 1; 
+  overflow: hidden; 
+  text-overflow: ellipsis; 
+  white-space: nowrap;
+}
+.file-item .size { 
+  color: #7f8c8d; 
+  margin-right: 10px; 
+  min-width: 70px; 
+  text-align: right; 
+  font-size: 13px;
+}
+.file-item .date {
+  color: #7f8c8d;
+  width: 150px;
+  font-size: 13px;
+  text-align: right;
+}
+.file-item .perms { 
+  color: #95a5a6; 
+  margin-right: 10px; 
+  font-family: monospace; 
+  font-size: 12px;
+  width: 70px;
+  text-align: right;
+}
+
+.checkbox-wrapper {
+  width: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 10px;
+}
+
+.checkbox-wrapper input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.file-status-bar {
+  padding: 10px 16px;
+  background: #f8f9fa;
+  border-top: 1px solid #ecf0f1;
+  font-size: 13px;
+  color: #7f8c8d;
+  display: flex;
+  justify-content: space-between;
+}
+
+.file-context-menu {
+  position: absolute;
+  background: white;
+  border: 1px solid #ecf0f1;
+  border-radius: 8px;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+  z-index: 1000;
+  min-width: 180px;
+  padding: 5px 0;
+}
+
+.file-context-menu .menu-item {
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: background 0.2s;
+  color: #34495e;
+}
+
+.file-context-menu .menu-item:hover {
+  background: #f0f4f8;
+}
+
+.file-context-menu .menu-item i {
+  margin-right: 8px;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+  color: #7f8c8d;
+}
+
+.file-context-menu .divider {
+  height: 1px;
+  background: #ecf0f1;
+  margin: 5px 0;
+}
+
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.modal {
+  background: white;
+  border-radius: 10px;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+  overflow: hidden;
+  animation: modalFadeIn 0.3s ease;
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; transform: translateY(-30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.modal-header {
+  padding: 16px 20px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #ecf0f1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-header h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #34495e;
+  margin: 0;
+}
+
+.modal-close {
+  border: none;
+  background: none;
+  color: #7f8c8d;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.modal-body {
+  padding: 20px;
+}
+
+.modal-footer {
+  padding: 16px 20px;
+  background: #f8f9fa;
+  border-top: 1px solid #ecf0f1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* Editor Styles */
+.editor-container {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 160px);
+  min-height: 400px;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+  overflow: hidden;
+}
+
+.editor-toolbar {
+  padding: 10px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #ecf0f1;
+  display: flex;
+  justify-content: space-between;
+}
+
+.editor-toolbar-right {
+  display: flex;
+  gap: 10px;
+}
+
+.editor-content {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+.editor-textarea {
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 16px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-size: 14px;
+  color: #34495e;
+  line-height: 1.5;
+  resize: none;
+}
+
+.editor-textarea:focus {
+  outline: none;
+}
+
+/* Upload Progress */
+.upload-progress-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 300px;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+  overflow: hidden;
+  z-index: 9999;
+}
+
+.upload-progress-header {
+  padding: 12px 16px;
+  background: #f8f9fa;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #ecf0f1;
+}
+
+.upload-progress-header h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.upload-progress-close {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #7f8c8d;
+}
+
+.upload-progress-items {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.upload-item {
+  padding: 10px 16px;
+  border-bottom: 1px solid #ecf0f1;
+}
+
+.upload-item-name {
+  font-size: 13px;
+  margin-bottom: 5px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.upload-item-progress {
+  height: 6px;
+  background: #ecf0f1;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.upload-item-progress-bar {
+  height: 100%;
+  background: #4a89dc;
+  transition: width 0.3s;
+}
+
+.upload-item-progress-bar.success {
+  background: #2ecc71;
+}
+
+.upload-item-progress-bar.error {
+  background: #e74c3c;
+}
+
+/* Terminal */
+.terminal-box { 
+  background: #2d3436; 
+  color: #dfe6e9; 
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace; 
+  padding: 20px; 
+  border-radius: 10px; 
+  min-height: 350px; 
+  max-height: 500px; 
+  overflow-y: auto; 
+  white-space: pre-wrap; 
+  word-break: break-all; 
+  font-size: 13px;
+}
+.term-input { 
+  display: flex; 
+  gap: 10px; 
+  margin-top: 10px;
+}
+.term-input input { 
+  flex: 1; 
+  background: #2d3436; 
+  border: 1px solid #636e72; 
+  color: #dfe6e9; 
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace; 
+  padding: 10px; 
+  border-radius: 6px; 
+  outline: none;
+}
+
+/* Helpers */
+.flex-row { 
+  display: flex; 
+  gap: 10px; 
+  align-items: end; 
+  flex-wrap: wrap; 
+  margin-bottom: 16px;
+}
+.space-between {
+  justify-content: space-between;
+}
+.mt { margin-top: 16px; }
+.mb { margin-bottom: 16px; }
+.ml { margin-left: 16px; }
+.mr { margin-right: 16px; }
+.text-center { text-align: center; }
 CSSEOF
 
 ##############################################
 # -------- public/js/app.js (Frontend) ------
 ##############################################
 cat > public/js/app.js <<'JSEOF'
+// API Helper
 var api = {
   req: function(url, opt) {
     opt = opt || {};
@@ -1438,15 +1889,59 @@ var api = {
   del: function(u) { return api.req(u, { method: 'DELETE' }); }
 };
 
+// Utilities
 var $ = function(id) { return document.getElementById(id); };
 function fmtB(b) { if(!b)return '0 B'; var k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k)); return (b/Math.pow(k,i)).toFixed(1)+' '+s[i]; }
 function fmtUp(s) { var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60); return d+'d '+h+'h '+m+'m'; }
 function esc(t) { var d=document.createElement('div'); d.textContent=t; return d.innerHTML; }
 function pClass(p) { return p>80?'danger':p>60?'warn':''; }
+function formatDate(d) { return new Date(d).toLocaleString(); }
+function getFileIcon(file) {
+  if (file.isDir) return 'folder';
+  
+  var ext = file.extension || '';
+  
+  // Check by extension
+  if (['jpg','jpeg','png','gif','svg','webp'].includes(ext)) return 'image';
+  if (['zip','tar','gz','rar','7z'].includes(ext)) return 'archive';
+  if (['mp4','avi','mov','wmv','mkv'].includes(ext)) return 'video';
+  if (['mp3','wav','ogg','flac'].includes(ext)) return 'audio';
+  if (['doc','docx','odt','rtf'].includes(ext)) return 'doc';
+  if (['xls','xlsx','ods','csv'].includes(ext)) return 'excel';
+  if (['pdf'].includes(ext)) return 'pdf';
+  if (['php','js','css','html','htm','xml','json','py','rb','java','c','cpp','h'].includes(ext)) return 'code';
+  
+  return 'file';
+}
 
+function getFileIconHtml(file) {
+  var iconClass = getFileIcon(file);
+  var icon = '';
+  
+  switch(iconClass) {
+    case 'folder': icon = '<i class="fas fa-folder icon folder"></i>'; break;
+    case 'image': icon = '<i class="far fa-file-image icon image"></i>'; break;
+    case 'archive': icon = '<i class="far fa-file-archive icon archive"></i>'; break;
+    case 'video': icon = '<i class="far fa-file-video icon"></i>'; break;
+    case 'audio': icon = '<i class="far fa-file-audio icon"></i>'; break;
+    case 'doc': icon = '<i class="far fa-file-word icon"></i>'; break;
+    case 'excel': icon = '<i class="far fa-file-excel icon"></i>'; break;
+    case 'pdf': icon = '<i class="far fa-file-pdf icon"></i>'; break;
+    case 'code': icon = '<i class="far fa-file-code icon code"></i>'; break;
+    default: icon = '<i class="far fa-file icon"></i>';
+  }
+  
+  return icon;
+}
+
+// App state
 var curPath = '/usr/local/lsws';
 var editFile = '';
+var selectedFiles = [];
+var sortConfig = { key: 'name', direction: 'asc' };
+var clipboard = { items: [], action: '' };
 
+// Authentication functions
 function checkAuth() {
   api.get('/api/auth').then(function(r) {
     if (r.authenticated) { showPanel(); loadPage('dashboard'); } else showLogin();
@@ -1455,6 +1950,7 @@ function checkAuth() {
 function showLogin() { $('loginPage').style.display='flex'; $('mainPanel').style.display='none'; }
 function showPanel() { $('loginPage').style.display='none'; $('mainPanel').style.display='flex'; }
 
+// Event Listeners
 $('loginForm').addEventListener('submit', function(e) {
   e.preventDefault();
   api.post('/api/login', { username: $('username').value, password: $('password').value }).then(function(r) {
@@ -1474,6 +1970,7 @@ document.querySelectorAll('.sidebar nav a').forEach(function(a) {
   });
 });
 
+// Page Router
 function loadPage(p) {
   var el = $('content');
   switch(p) {
@@ -1481,7 +1978,6 @@ function loadPage(p) {
     case 'services':  return pgSvc(el);
     case 'files':     return pgFiles(el);
     case 'domains':   return pgDom(el);
-    case 'cloudflare': return pgCloudflare(el);
     case 'databases': return pgDb(el);
     case 'tunnel':    return pgTun(el);
     case 'terminal':  return pgTerm(el);
@@ -1489,12 +1985,13 @@ function loadPage(p) {
   }
 }
 
+// Dashboard Page
 function pgDash(el) {
   Promise.all([api.get('/api/dashboard'), api.get('/api/services')]).then(function(res) {
     var d = res[0], s = res[1];
     var mp = Math.round(d.memory.used/d.memory.total*100);
     var dp = d.disk.total ? Math.round(d.disk.used/d.disk.total*100) : 0;
-    el.innerHTML = '<h2 class="page-title">📊 Dashboard</h2><p class="page-sub">'+d.hostname+' ('+d.ip+')</p>'
+    el.innerHTML = '<h2 class="page-title"><i class="fas fa-tachometer-alt"></i> Dashboard</h2><p class="page-sub">'+d.hostname+' ('+d.ip+')</p>'
       +'<div class="stats-grid">'
       +'<div class="card"><div class="label">CPU</div><div class="value">'+d.cpu.cores+' Cores</div><div class="sub">Load: '+d.cpu.load.map(function(l){return l.toFixed(2)}).join(', ')+'</div></div>'
       +'<div class="card"><div class="label">Memory</div><div class="value">'+mp+'%</div><div class="progress"><div class="progress-bar '+pClass(mp)+'" style="width:'+mp+'%"></div></div><div class="sub">'+fmtB(d.memory.used)+' / '+fmtB(d.memory.total)+'</div></div>'
@@ -1503,556 +2000,1184 @@ function pgDash(el) {
       +'</div><h3 class="mb">Services</h3><table class="tbl"><thead><tr><th>Service</th><th>Status</th></tr></thead><tbody>'
       +s.map(function(x){return '<tr><td>'+x.name+'</td><td><span class="badge '+(x.active?'badge-on':'badge-off')+'">'+(x.active?'Running':'Stopped')+'</span></td></tr>';}).join('')
       +'</tbody></table>'
-      +'<div class="mt"><a href="http://'+d.ip+':7080" target="_blank" class="btn btn-p">OLS Admin</a> <a href="http://'+d.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w">phpMyAdmin</a></div>';
+      +'<div class="mt"><a href="http://'+d.ip+':7080" target="_blank" class="btn btn-p"><i class="fas fa-cog"></i> OLS Admin</a> <a href="http://'+d.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w"><i class="fas fa-database"></i> phpMyAdmin</a></div>';
   });
 }
 
+// Services Page
 function pgSvc(el) {
   api.get('/api/services').then(function(s) {
-    el.innerHTML = '<h2 class="page-title">⚙️ Services</h2><p class="page-sub">Manage services</p><div id="svcMsg"></div>'
+    el.innerHTML = '<h2 class="page-title"><i class="fas fa-cogs"></i> Services</h2><p class="page-sub">Manage server services</p><div id="svcMsg"></div>'
       +'<table class="tbl"><thead><tr><th>Service</th><th>Status</th><th>Actions</th></tr></thead><tbody>'
       +s.map(function(x){
         return '<tr><td><strong>'+x.name+'</strong></td>'
           +'<td><span class="badge '+(x.active?'badge-on':'badge-off')+'">'+(x.active?'Running':'Stopped')+'</span></td>'
-          +'<td><button class="btn btn-s btn-sm" data-svc="'+x.name+'" data-act="start" onclick="svcAct(this)">Start</button> '
-          +'<button class="btn btn-d btn-sm" data-svc="'+x.name+'" data-act="stop" onclick="svcAct(this)">Stop</button> '
-          +'<button class="btn btn-w btn-sm" data-svc="'+x.name+'" data-act="restart" onclick="svcAct(this)">Restart</button></td></tr>';
+          +'<td><button class="btn btn-s btn-sm" data-svc="'+x.name+'" data-act="start" onclick="svcAct(this)"><i class="fas fa-play"></i> Start</button> '
+          +'<button class="btn btn-d btn-sm" data-svc="'+x.name+'" data-act="stop" onclick="svcAct(this)"><i class="fas fa-stop"></i> Stop</button> '
+          +'<button class="btn btn-w btn-sm" data-svc="'+x.name+'" data-act="restart" onclick="svcAct(this)"><i class="fas fa-sync-alt"></i> Restart</button></td></tr>';
       }).join('')+'</tbody></table>';
   });
 }
 window.svcAct = function(btn) {
   var n=btn.dataset.svc, a=btn.dataset.act;
   api.post('/api/services/'+n+'/'+a).then(function(r) {
-    $('svcMsg').innerHTML = r.success?'<div class="alert alert-ok">'+n+' '+a+'ed</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    $('svcMsg').innerHTML = r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> '+n+' '+a+'ed</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
     setTimeout(function(){loadPage('services')},1200);
   });
 };
 
+// File Manager Page
 function pgFiles(el, p) {
   if (p !== undefined) curPath = p;
-  api.get('/api/files?path='+encodeURIComponent(curPath)).then(function(d) {
-    if (d.error) { el.innerHTML='<div class="alert alert-err">'+esc(d.error)+'</div>'; return; }
+  selectedFiles = [];
+  
+  el.innerHTML = '<h2 class="page-title"><i class="fas fa-folder"></i> File Manager</h2>'
+    + '<div id="fileManagerContainer"></div>';
+  
+  loadFileManager(curPath);
+}
+
+function loadFileManager(path) {
+  api.get('/api/files?path='+encodeURIComponent(path)).then(function(d) {
+    if (d.error) { 
+      $('fileManagerContainer').innerHTML ='<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+esc(d.error)+'</div>';
+      return; 
+    }
+    
     if (d.binary) {
       curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
-      el.innerHTML='<h2 class="page-title">📄 Binary File</h2><p class="page-sub">'+esc(d.path)+'</p>'
-        +'<div class="card"><p>Binary file ('+fmtB(d.size)+') — cannot edit</p>'
-        +'<div class="mt"><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p" target="_blank">Download</a> '
-        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
+      $('fileManagerContainer').innerHTML = '<div class="card">'
+        + '<h3 class="mb">Binary File</h3>'
+        + '<p>'+esc(d.path)+' ('+fmtB(d.size)+')</p>'
+        + '<p class="mb">This file contains binary content and cannot be edited in the browser.</p>'
+        + '<div><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p"><i class="fas fa-download"></i> Download</a> '
+        + '<button class="btn btn-l" onclick="loadFileManager(\''+esc(curPath)+'\')"><i class="fas fa-arrow-left"></i> Back</button></div>'
+        + '</div>';
       return;
     }
+    
     if (d.tooLarge) {
       curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
-      el.innerHTML='<h2 class="page-title">📄 Large File</h2><p class="page-sub">'+esc(d.path)+'</p>'
-        +'<div class="card"><p>File too large to edit ('+fmtB(d.size)+')</p>'
-        +'<div class="mt"><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p" target="_blank">Download</a> '
-        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div></div>';
+      $('fileManagerContainer').innerHTML = '<div class="card">'
+        + '<h3 class="mb">Large File</h3>'
+        + '<p>'+esc(d.path)+' ('+fmtB(d.size)+')</p>'
+        + '<p class="mb">This file is too large to edit in the browser. Maximum allowed size: '+fmtB(5*1024*1024)+'</p>'
+        + '<div><a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-p"><i class="fas fa-download"></i> Download</a> '
+        + '<button class="btn btn-l" onclick="loadFileManager(\''+esc(curPath)+'\')"><i class="fas fa-arrow-left"></i> Back</button></div>'
+        + '</div>';
       return;
     }
+    
     if (d.content !== undefined) {
-      editFile = d.path;
-      curPath = d.path.substring(0, d.path.lastIndexOf('/'))||'/';
-      el.innerHTML='<h2 class="page-title">📝 Edit</h2><p class="page-sub">'+esc(d.path)+' ('+fmtB(d.size)+')</p><div id="fMsg"></div>'
-        +'<textarea class="form-control" id="fContent">'+esc(d.content)+'</textarea>'
-        +'<div class="mt"><button class="btn btn-p" onclick="saveFile()">💾 Save</button> '
-        +'<a href="/api/files/download?path='+encodeURIComponent(d.path)+'" class="btn btn-w" target="_blank">Download</a> '
-        +'<button class="btn btn-d" onclick="pgFiles($(\'content\'))">Back</button></div>';
+      showFileEditor(d);
       return;
     }
-    var parts=curPath.split('/').filter(Boolean);
-    var bc='<a data-nav="/" onclick="navF(this)">root</a>', bp='';
-    parts.forEach(function(x){ bp+='/'+x; bc+=' <span>/</span> <a data-nav="'+encodeURIComponent(bp)+'" onclick="navF(this)">'+esc(x)+'</a>'; });
-    var items=(d.items||[]).sort(function(a,b){ return a.isDir===b.isDir?a.name.localeCompare(b.name):(a.isDir?-1:1); });
-    var parent=curPath==='/'?'':(curPath.split('/').slice(0,-1).join('/')||'/');
-    var html='<h2 class="page-title">📁 File Manager</h2><div class="breadcrumb">'+bc+'</div><div id="fMsg"></div>'
-      +'<div class="mb"><button class="btn btn-p" onclick="uploadF()">📤 Upload</button> <button class="btn btn-s" onclick="mkdirF()">📁 New Folder</button></div><div>';
-    if (parent) html+='<div class="file-item" data-nav="'+encodeURIComponent(parent)+'" ondblclick="navF(this)"><span class="icon">📁</span><span class="name">..</span><span class="size"></span></div>';
-    items.forEach(function(i){
-      var fp=(curPath==='/'?'':curPath)+'/'+i.name, enc=encodeURIComponent(fp);
-      html+='<div class="file-item" data-nav="'+enc+'" ondblclick="navF(this)">'
-        +'<span class="icon">'+(i.isDir?'📁':'📄')+'</span><span class="name">'+esc(i.name)+'</span>'
-        +(i.perms?'<span class="perms">'+i.perms+'</span>':'')
-        +'<span class="size">'+(i.isDir?'':fmtB(i.size))+'</span>'
-        +'<div class="file-actions">'
-        +(!i.isDir?'<a href="/api/files/download?path='+enc+'" class="btn btn-p btn-sm" target="_blank" onclick="event.stopPropagation()">⬇</a> ':'')
-        +'<button class="btn btn-w btn-sm" data-rn="'+enc+'" onclick="event.stopPropagation();renF(this)">✏️</button> '
-        +'<button class="btn btn-d btn-sm" data-del="'+enc+'" onclick="event.stopPropagation();delF(this)">🗑</button>'
-        +'</div></div>';
+    
+    // Build breadcrumbs
+    var parts = path.split('/').filter(Boolean);
+    var bc = '<a data-path="/" onclick="navToPath(this)"><i class="fas fa-home"></i> root</a>';
+    var bp = '';
+    parts.forEach(function(x) { 
+      bp += '/'+x; 
+      bc += ' <span>/</span> <a data-path="'+bp+'" onclick="navToPath(this)">'+esc(x)+'</a>'; 
     });
-    el.innerHTML=html+'</div>';
+    
+    // Sort items
+    var items = (d.items || []);
+    sortFiles(items);
+    
+    var parentPath = path === '/' ? '' : (path.split('/').slice(0, -1).join('/') || '/');
+    
+    // Build file manager
+    var html = `
+      <div class="file-manager">
+        <div class="file-toolbar">
+          <div>
+            <button class="btn btn-p btn-sm" onclick="showUploadDialog()"><i class="fas fa-upload"></i> Upload</button>
+            <button class="btn btn-s btn-sm" onclick="showNewFolderDialog()"><i class="fas fa-folder-plus"></i> New Folder</button>
+            <button class="btn btn-l btn-sm" onclick="showNewFileDialog()"><i class="fas fa-file"></i> New File</button>
+          </div>
+          <div>
+            <button class="btn btn-l btn-sm" onclick="refreshCurrentFolder()"><i class="fas fa-sync-alt"></i> Refresh</button>
+          </div>
+        </div>
+        
+        <div class="breadcrumb" style="margin: 10px 16px 0;">
+          ${bc}
+        </div>
+        
+        <div class="file-container" id="fileList">
+          ${parentPath ? 
+            `<div class="file-item" data-path="${parentPath}" ondblclick="navToPath(this)">
+              <div class="checkbox-wrapper"></div>
+              <i class="fas fa-level-up-alt icon"></i>
+              <span class="name">..</span>
+              <span class="size"></span>
+              <span class="perms"></span>
+              <span class="date"></span>
+            </div>` : ''}
+          ${items.map(function(item) {
+            var itemPath = (path === '/' ? '' : path) + '/' + item.name;
+            return `
+              <div class="file-item" data-path="${itemPath}" data-filename="${item.name}" 
+                   onclick="selectFile(this, event)" ondblclick="openFile(this)" oncontextmenu="showFileContextMenu(event, this)">
+                <div class="checkbox-wrapper">
+                  <input type="checkbox" onclick="event.stopPropagation()" onchange="checkboxChanged(this, '${itemPath}')">
+                </div>
+                ${getFileIconHtml(item)}
+                <span class="name">${esc(item.name)}</span>
+                <span class="size">${item.isDir ? '' : fmtB(item.size)}</span>
+                <span class="perms">${item.perms || ''}</span>
+                <span class="date">${item.modified ? formatDate(item.modified) : ''}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        
+        <div class="file-status-bar">
+          <div>${items.length} items</div>
+          <div>
+            <button class="btn btn-l btn-sm" id="selectAllBtn" onclick="toggleSelectAll()">
+              <i class="fas fa-check-square"></i> Select All
+            </button>
+            <span id="selectedCount"></span>
+          </div>
+        </div>
+      </div>
+      
+      <div id="fileContextMenu" class="file-context-menu" style="display: none;"></div>
+      <div id="modalContainer"></div>
+    `;
+    
+    $('fileManagerContainer').innerHTML = html;
+    updateSelectedCount();
+    
+    // Add event listeners for keyboard shortcuts
+    document.addEventListener('keydown', handleFileManagerKeydown);
   });
 }
-window.navF = function(el) { var p=el.dataset?el.dataset.nav:el.getAttribute('data-nav'); if(p)pgFiles($('content'),decodeURIComponent(p)); };
-window.saveFile = function() {
-  api.put('/api/files',{filePath:editFile,content:$('fContent').value}).then(function(r){
-    $('fMsg').innerHTML=r.success?'<div class="alert alert-ok">Saved!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
-  });
-};
-window.delF = function(btn) { var p=decodeURIComponent(btn.dataset.del); if(confirm('Delete '+p+'?'))api.del('/api/files?path='+encodeURIComponent(p)).then(function(){pgFiles($('content'))}); };
-window.renF = function(btn) {
-  var old=decodeURIComponent(btn.dataset.rn), nm=old.split('/').pop(), nn=prompt('Rename to:',nm);
-  if(nn&&nn!==nm){ var dir=old.substring(0,old.lastIndexOf('/')); api.post('/api/files/rename',{oldPath:old,newPath:dir+'/'+nn}).then(function(r){if(r.success)pgFiles($('content'));else alert('Error: '+(r.error||''));}); }
-};
-window.uploadF = function() {
-  var inp=document.createElement('input'); inp.type='file';
-  inp.onchange=function(){ var fd=new FormData(); fd.append('file',inp.files[0]); fd.append('path',curPath); api.req('/api/files/upload',{method:'POST',body:fd}).then(function(){pgFiles($('content'))}); };
-  inp.click();
-};
-window.mkdirF = function() { var n=prompt('Folder name:'); if(n)api.post('/api/files/mkdir',{path:curPath+'/'+n}).then(function(){pgFiles($('content'))}); };
 
+function sortFiles(files) {
+  files.sort(function(a, b) {
+    // Always put folders first
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    
+    // Then sort by the configured key
+    var key = sortConfig.key;
+    var aValue = a[key];
+    var bValue = b[key];
+    
+    // Special case for dates
+    if (key === 'modified') {
+      aValue = new Date(aValue).getTime();
+      bValue = new Date(bValue).getTime();
+    }
+    
+    // Compare values
+    if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+    if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+    return 0;
+  });
+}
+
+function navToPath(el) {
+  var path = el.getAttribute('data-path');
+  loadFileManager(path);
+  curPath = path;
+  
+  // Remove event listeners when navigating
+  document.removeEventListener('keydown', handleFileManagerKeydown);
+}
+
+function refreshCurrentFolder() {
+  loadFileManager(curPath);
+}
+
+function selectFile(el, e) {
+  if (e.ctrlKey || e.metaKey) {
+    // Toggle this file's selection
+    el.classList.toggle('selected');
+    
+    // Update checkbox
+    var checkbox = el.querySelector('input[type="checkbox"]');
+    checkbox.checked = el.classList.contains('selected');
+    
+    // Update selected files array
+    var path = el.getAttribute('data-path');
+    if (el.classList.contains('selected')) {
+      if (!selectedFiles.includes(path)) selectedFiles.push(path);
+    } else {
+      selectedFiles = selectedFiles.filter(p => p !== path);
+    }
+    
+  } else if (e.shiftKey) {
+    // Get all file items
+    var items = Array.from(document.querySelectorAll('#fileList .file-item[data-filename]'));
+    
+    // Find the last selected item index
+    var lastSelected = items.findIndex(item => item.classList.contains('selected'));
+    if (lastSelected === -1) lastSelected = 0;
+    
+    // Find the current item index
+    var currentIndex = items.indexOf(el);
+    
+    // Select all items between last selected and current
+    var start = Math.min(lastSelected, currentIndex);
+    var end = Math.max(lastSelected, currentIndex);
+    
+    for (var i = start; i <= end; i++) {
+      items[i].classList.add('selected');
+      items[i].querySelector('input[type="checkbox"]').checked = true;
+      
+      var path = items[i].getAttribute('data-path');
+      if (!selectedFiles.includes(path)) selectedFiles.push(path);
+    }
+    
+  } else {
+    // Clear all selections
+    document.querySelectorAll('#fileList .file-item').forEach(item => {
+      item.classList.remove('selected');
+      var checkbox = item.querySelector('input[type="checkbox"]');
+      if (checkbox) checkbox.checked = false;
+    });
+    
+    // Select this file
+    el.classList.add('selected');
+    var checkbox = el.querySelector('input[type="checkbox"]');
+    checkbox.checked = true;
+    
+    // Update selected files array
+    selectedFiles = [el.getAttribute('data-path')];
+  }
+  
+  updateSelectedCount();
+}
+
+function checkboxChanged(checkbox, path) {
+  var fileItem = checkbox.closest('.file-item');
+  
+  if (checkbox.checked) {
+    fileItem.classList.add('selected');
+    if (!selectedFiles.includes(path)) selectedFiles.push(path);
+  } else {
+    fileItem.classList.remove('selected');
+    selectedFiles = selectedFiles.filter(p => p !== path);
+  }
+  
+  updateSelectedCount();
+}
+
+function toggleSelectAll() {
+  var allItems = document.querySelectorAll('#fileList .file-item[data-filename]');
+  var allSelected = selectedFiles.length === allItems.length;
+  
+  // Toggle selection state
+  if (allSelected) {
+    // Deselect all
+    allItems.forEach(item => {
+      item.classList.remove('selected');
+      var checkbox = item.querySelector('input[type="checkbox"]');
+      if (checkbox) checkbox.checked = false;
+    });
+    selectedFiles = [];
+  } else {
+    // Select all
+    selectedFiles = [];
+    allItems.forEach(item => {
+      item.classList.add('selected');
+      var checkbox = item.querySelector('input[type="checkbox"]');
+      if (checkbox) checkbox.checked = true;
+      
+      var path = item.getAttribute('data-path');
+      selectedFiles.push(path);
+    });
+  }
+  
+  updateSelectedCount();
+}
+
+function updateSelectedCount() {
+  var countEl = $('selectedCount');
+  if (!countEl) return;
+  
+  if (selectedFiles.length > 0) {
+    countEl.innerHTML = `<span style="margin-left: 10px;">${selectedFiles.length} selected</span>`;
+    
+    // Add action buttons for selection
+    countEl.innerHTML += `
+      <button class="btn btn-l btn-sm" onclick="showBulkAction('copy')"><i class="fas fa-copy"></i> Copy</button>
+      <button class="btn btn-l btn-sm" onclick="showBulkAction('cut')"><i class="fas fa-cut"></i> Cut</button>
+      <button class="btn btn-d btn-sm" onclick="showBulkAction('delete')"><i class="fas fa-trash-alt"></i> Delete</button>
+      ${selectedFiles.length === 1 ? `<button class="btn btn-l btn-sm" onclick="showBulkAction('rename')"><i class="fas fa-edit"></i> Rename</button>` : ''}
+      ${selectedFiles.length >= 1 ? `<button class="btn btn-l btn-sm" onclick="showBulkAction('compress')"><i class="fas fa-file-archive"></i> Compress</button>` : ''}
+    `;
+  } else {
+    countEl.innerHTML = '';
+    
+    // Check if we have clipboard items to show paste button
+    if (clipboard.items && clipboard.items.length > 0) {
+      countEl.innerHTML += `<button class="btn btn-l btn-sm" onclick="pasteFiles()"><i class="fas fa-paste"></i> Paste</button>`;
+    }
+  }
+}
+
+function showFileContextMenu(e, el) {
+  e.preventDefault();
+  
+  // If the item is not selected, select only this item
+  if (!el.classList.contains('selected')) {
+    document.querySelectorAll('#fileList .file-item').forEach(item => {
+      item.classList.remove('selected');
+      var checkbox = item.querySelector('input[type="checkbox"]');
+      if (checkbox) checkbox.checked = false;
+    });
+    
+    el.classList.add('selected');
+    var checkbox = el.querySelector('input[type="checkbox"]');
+    if (checkbox) checkbox.checked = true;
+    
+    selectedFiles = [el.getAttribute('data-path')];
+    updateSelectedCount();
+  }
+  
+  var path = el.getAttribute('data-path');
+  var fileName = el.getAttribute('data-filename');
+  var isFolder = el.querySelector('.icon.folder') !== null;
+  
+  // Create the context menu
+  var menu = $('fileContextMenu');
+  menu.innerHTML = '';
+  
+  // Common actions for all items
+  menu.innerHTML += `
+    <div class="menu-item" onclick="openFile(document.querySelector('.file-item.selected'))">
+      <i class="fas fa-folder-open"></i> Open
+    </div>
+  `;
+  
+  if (!isFolder) {
+    menu.innerHTML += `
+      <div class="menu-item" onclick="downloadSelectedFiles()">
+        <i class="fas fa-download"></i> Download
+      </div>
+    `;
+  }
+  
+  menu.innerHTML += `
+    <div class="menu-item" onclick="showBulkAction('rename')">
+      <i class="fas fa-edit"></i> Rename
+    </div>
+    <div class="menu-item" onclick="showBulkAction('copy')">
+      <i class="fas fa-copy"></i> Copy
+    </div>
+    <div class="menu-item" onclick="showBulkAction('cut')">
+      <i class="fas fa-cut"></i> Cut
+    </div>
+    <div class="divider"></div>
+    <div class="menu-item" onclick="showBulkAction('delete')">
+      <i class="fas fa-trash-alt"></i> Delete
+    </div>
+  `;
+  
+  // Extra options for specific file types
+  if (isFolder) {
+    menu.innerHTML += `
+      <div class="divider"></div>
+      <div class="menu-item" onclick="showBulkAction('compress')">
+        <i class="fas fa-file-archive"></i> Compress
+      </div>
+    `;
+  } else {
+    var ext = fileName.split('.').pop().toLowerCase();
+    
+    if (['zip', 'tar', 'gz', 'rar'].includes(ext)) {
+      menu.innerHTML += `
+        <div class="divider"></div>
+        <div class="menu-item" onclick="showExtractDialog('${path}')">
+          <i class="fas fa-box-open"></i> Extract
+        </div>
+      `;
+    }
+    
+    // Option to edit text files
+    if (['txt', 'html', 'css', 'js', 'php', 'conf', 'json', 'md', 'xml', 'ini'].includes(ext)) {
+      menu.innerHTML += `
+        <div class="menu-item" onclick="editFile('${path}')">
+          <i class="fas fa-edit"></i> Edit
+        </div>
+      `;
+    }
+  }
+  
+  menu.innerHTML += `
+    <div class="divider"></div>
+    <div class="menu-item" onclick="showPermissionsDialog('${path}')">
+      <i class="fas fa-key"></i> Permissions
+    </div>
+  `;
+  
+  // Position and show the menu
+  menu.style.top = e.pageY + 'px';
+  menu.style.left = e.pageX + 'px';
+  menu.style.display = 'block';
+  
+  // Hide menu when clicking elsewhere
+  document.addEventListener('click', hideContextMenu);
+  
+  // Ensure menu doesn't go off screen
+  var rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    menu.style.left = (e.pageX - rect.width) + 'px';
+  }
+  if (rect.bottom > window.innerHeight) {
+    menu.style.top = (e.pageY - rect.height) + 'px';
+  }
+}
+
+function hideContextMenu() {
+  var menu = $('fileContextMenu');
+  if (menu) menu.style.display = 'none';
+  document.removeEventListener('click', hideContextMenu);
+}
+
+function openFile(el) {
+  var path = el.getAttribute('data-path');
+  var isFolder = el.querySelector('.icon.folder') !== null;
+  
+  if (isFolder) {
+    loadFileManager(path);
+    curPath = path;
+  } else {
+    editFile(path);
+  }
+}
+
+function editFile(path) {
+  api.get('/api/files?path=' + encodeURIComponent(path)).then(function(data) {
+    if (data.binary || data.tooLarge) {
+      alert('This file cannot be edited in the browser.');
+      return;
+    }
+    
+    showFileEditor(data);
+  });
+}
+
+function showFileEditor(data) {
+  editFile = data.path;
+  curPath = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  
+  // Get file extension for syntax highlighting
+  var extension = data.extension || '';
+  
+  $('fileManagerContainer').innerHTML = `
+    <div class="editor-container">
+      <div class="editor-toolbar">
+        <div>
+          <strong>${esc(data.path)}</strong> (${fmtB(data.size)})
+        </div>
+        <div class="editor-toolbar-right">
+          <button class="btn btn-p btn-sm" onclick="saveEditedFile()"><i class="fas fa-save"></i> Save</button>
+          <button class="btn btn-l btn-sm" onclick="loadFileManager('${esc(curPath)}')"><i class="fas fa-times"></i> Close</button>
+        </div>
+      </div>
+      <div class="editor-content">
+        <textarea id="fileContent" class="editor-textarea">${esc(data.content)}</textarea>
+      </div>
+    </div>
+    <div id="editorStatus" class="alert" style="display:none;margin-top:15px;"></div>
+  `;
+}
+
+function saveEditedFile() {
+  api.put('/api/files', { 
+    filePath: editFile, 
+    content: $('fileContent').value 
+  }).then(function(r) {
+    var status = $('editorStatus');
+    if (r.success) {
+      status.className = 'alert alert-ok';
+      status.innerHTML = '<i class="fas fa-check-circle"></i> File saved successfully';
+    } else {
+      status.className = 'alert alert-err';
+      status.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to save file');
+    }
+    status.style.display = 'block';
+    
+    // Hide the status after 3 seconds
+    setTimeout(function() {
+      status.style.display = 'none';
+    }, 3000);
+  });
+}
+
+function showUploadDialog() {
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-upload"></i> Upload Files</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb">Upload files to current directory: <strong>${esc(curPath)}</strong></p>
+          <div class="form-group">
+            <input type="file" id="fileUpload" multiple class="form-control">
+          </div>
+          <div id="uploadStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="uploadFiles()"><i class="fas fa-upload"></i> Upload</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function uploadFiles() {
+  var files = $('fileUpload').files;
+  if (files.length === 0) {
+    $('uploadStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> No files selected</div>';
+    return;
+  }
+  
+  var formData = new FormData();
+  for (var i = 0; i < files.length; i++) {
+    formData.append('files', files[i]);
+  }
+  formData.append('path', curPath);
+  
+  $('uploadStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-spinner fa-spin"></i> Uploading files...</div>';
+  
+  api.req('/api/files/upload', { method: 'POST', body: formData })
+    .then(function(response) {
+      if (response.success) {
+        $('uploadStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Files uploaded successfully</div>';
+        
+        // Refresh file list after a brief delay
+        setTimeout(function() {
+          closeModal();
+          loadFileManager(curPath);
+        }, 1000);
+      } else {
+        $('uploadStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Upload failed') + '</div>';
+      }
+    })
+    .catch(function(error) {
+      $('uploadStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Upload failed: ' + error.message + '</div>';
+    });
+}
+
+function showNewFolderDialog() {
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-folder-plus"></i> Create New Folder</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb">Create new folder in: <strong>${esc(curPath)}</strong></p>
+          <div class="form-group">
+            <label for="folderName">Folder Name</label>
+            <input type="text" id="folderName" class="form-control" placeholder="new_folder">
+          </div>
+          <div id="folderStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="createNewFolder()"><i class="fas fa-folder-plus"></i> Create Folder</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function createNewFolder() {
+  var name = $('folderName').value.trim();
+  if (!name) {
+    $('folderStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter a folder name</div>';
+    return;
+  }
+  
+  var path = curPath === '/' ? '/' + name : curPath + '/' + name;
+  
+  api.post('/api/files/mkdir', { path: path })
+    .then(function(response) {
+      if (response.success) {
+        $('folderStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Folder created successfully</div>';
+        
+        setTimeout(function() {
+          closeModal();
+          loadFileManager(curPath);
+        }, 1000);
+      } else {
+        $('folderStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Failed to create folder') + '</div>';
+      }
+    });
+}
+
+function showNewFileDialog() {
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-file"></i> Create New File</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb">Create new file in: <strong>${esc(curPath)}</strong></p>
+          <div class="form-group">
+            <label for="fileName">File Name</label>
+            <input type="text" id="fileName" class="form-control" placeholder="example.txt">
+          </div>
+          <div id="fileStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="createNewFile()"><i class="fas fa-file"></i> Create File</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function createNewFile() {
+  var name = $('fileName').value.trim();
+  if (!name) {
+    $('fileStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter a file name</div>';
+    return;
+  }
+  
+  var path = curPath === '/' ? '/' + name : curPath + '/' + name;
+  
+  api.post('/api/files/newfile', { path: path, content: '' })
+    .then(function(response) {
+      if (response.success) {
+        $('fileStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> File created successfully</div>';
+        
+        setTimeout(function() {
+          closeModal();
+          editFile(path);
+        }, 1000);
+      } else {
+        $('fileStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Failed to create file') + '</div>';
+      }
+    });
+}
+
+function downloadSelectedFiles() {
+  if (selectedFiles.length === 0) return;
+  
+  if (selectedFiles.length === 1) {
+    // Single file - direct download
+    window.open('/api/files/download?path=' + encodeURIComponent(selectedFiles[0]), '_blank');
+  } else {
+    // Multiple files - need to compress first
+    showCompressDialog();
+  }
+}
+
+function showBulkAction(action) {
+  if (selectedFiles.length === 0) return;
+  
+  switch (action) {
+    case 'delete':
+      if (confirm('Delete ' + selectedFiles.length + ' item(s)? This cannot be undone.')) {
+        deleteSelectedFiles();
+      }
+      break;
+    case 'copy':
+      clipboard = { items: selectedFiles.slice(), action: 'copy' };
+      showNotification('Copied ' + selectedFiles.length + ' item(s) to clipboard');
+      updateSelectedCount();
+      break;
+    case 'cut':
+      clipboard = { items: selectedFiles.slice(), action: 'cut' };
+      showNotification('Cut ' + selectedFiles.length + ' item(s) to clipboard');
+      updateSelectedCount();
+      break;
+    case 'rename':
+      if (selectedFiles.length === 1) {
+        showRenameDialog(selectedFiles[0]);
+      }
+      break;
+    case 'compress':
+      showCompressDialog();
+      break;
+  }
+}
+
+function showNotification(message) {
+  var container = document.createElement('div');
+  container.style.position = 'fixed';
+  container.style.bottom = '20px';
+  container.style.left = '20px';
+  container.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+  container.style.color = 'white';
+  container.style.padding = '10px 20px';
+  container.style.borderRadius = '5px';
+  container.style.zIndex = '9999';
+  container.innerText = message;
+  
+  document.body.appendChild(container);
+  
+  setTimeout(() => {
+    container.style.opacity = '0';
+    container.style.transition = 'opacity 0.5s';
+    setTimeout(() => {
+      document.body.removeChild(container);
+    }, 500);
+  }, 3000);
+}
+
+function showRenameDialog(path) {
+  var oldName = path.split('/').pop();
+  var parentDir = path.substring(0, path.lastIndexOf('/')) || '/';
+  
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-edit"></i> Rename Item</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p>Rename <strong>${esc(oldName)}</strong></p>
+          <div class="form-group">
+            <label for="newName">New Name</label>
+            <input type="text" id="newName" class="form-control" value="${esc(oldName)}">
+          </div>
+          <div id="renameStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="renameFile('${esc(path)}')"><i class="fas fa-save"></i> Rename</button>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  // Focus and select the filename
+  setTimeout(() => {
+    var input = $('newName');
+    input.focus();
+    input.setSelectionRange(0, oldName.lastIndexOf('.') > 0 ? oldName.lastIndexOf('.') : oldName.length);
+  }, 100);
+}
+
+function renameFile(oldPath) {
+  var newName = $('newName').value.trim();
+  if (!newName) {
+    $('renameStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter a name</div>';
+    return;
+  }
+  
+  var parentDir = oldPath.substring(0, oldPath.lastIndexOf('/')) || '/';
+  var newPath = parentDir === '/' ? '/' + newName : parentDir + '/' + newName;
+  
+  api.post('/api/files/rename', { oldPath: oldPath, newPath: newPath })
+    .then(function(response) {
+      if (response.success) {
+        $('renameStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Renamed successfully</div>';
+        
+        setTimeout(function() {
+          closeModal();
+          loadFileManager(curPath);
+        }, 1000);
+      } else {
+        $('renameStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Rename failed') + '</div>';
+      }
+    });
+}
+
+function showCompressDialog() {
+  var defaultName = selectedFiles.length === 1 ? 
+    (selectedFiles[0].split('/').pop() + '.zip') : 
+    (curPath.split('/').pop() || 'files') + '.zip';
+  
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-file-archive"></i> Create Archive</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p>Compress ${selectedFiles.length} selected item(s)</p>
+          <div class="form-group">
+            <label for="archiveName">Archive Name</label>
+            <input type="text" id="archiveName" class="form-control" value="${esc(defaultName)}">
+          </div>
+          <div id="compressStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="compressFiles()"><i class="fas fa-file-archive"></i> Compress</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function compressFiles() {
+  var archiveName = $('archiveName').value.trim();
+  if (!archiveName) {
+    $('compressStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter a name</div>';
+    return;
+  }
+  
+  // Ensure it has .zip extension
+  if (!archiveName.toLowerCase().endsWith('.zip')) {
+    archiveName += '.zip';
+  }
+  
+  // Determine output path
+  var outputPath = curPath === '/' ? '/' + archiveName : curPath + '/' + archiveName;
+  
+  $('compressStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-spinner fa-spin"></i> Compressing files...</div>';
+  
+  api.post('/api/files/compress', {
+    paths: selectedFiles,
+    output: outputPath
+  }).then(function(response) {
+    if (response.success) {
+      $('compressStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Archive created successfully</div>';
+      
+      setTimeout(function() {
+        closeModal();
+        loadFileManager(curPath);
+      }, 1000);
+    } else {
+      $('compressStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Compression failed') + '</div>';
+    }
+  });
+}
+
+function showExtractDialog(archivePath) {
+  var parentDir = archivePath.substring(0, archivePath.lastIndexOf('/')) || '/';
+  var archiveName = archivePath.split('/').pop();
+  var defaultTarget = parentDir === '/' ? 
+    '/' + archiveName.replace(/\.zip$|\.tar$|\.gz$|\.rar$/i, '') : 
+    parentDir + '/' + archiveName.replace(/\.zip$|\.tar$|\.gz$|\.rar$/i, '');
+  
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-box-open"></i> Extract Archive</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p>Extract <strong>${esc(archiveName)}</strong></p>
+          <div class="form-group">
+            <label for="extractPath">Extract to</label>
+            <input type="text" id="extractPath" class="form-control" value="${esc(defaultTarget)}">
+          </div>
+          <div id="extractStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="extractArchive('${esc(archivePath)}')"><i class="fas fa-box-open"></i> Extract</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function extractArchive(archivePath) {
+  var targetDir = $('extractPath').value.trim();
+  if (!targetDir) {
+    $('extractStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter a destination path</div>';
+    return;
+  }
+  
+  $('extractStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-spinner fa-spin"></i> Extracting archive...</div>';
+  
+  api.post('/api/files/extract', {
+    archive: archivePath,
+    target: targetDir
+  }).then(function(response) {
+    if (response.success) {
+      $('extractStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Archive extracted successfully</div>';
+      
+      setTimeout(function() {
+        closeModal();
+        loadFileManager(targetDir);
+      }, 1000);
+    } else {
+      $('extractStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Extraction failed') + '</div>';
+    }
+  });
+}
+
+function showPermissionsDialog(path) {
+  api.get('/api/files/permissions?path=' + encodeURIComponent(path))
+    .then(function(data) {
+      if (data.error) {
+        alert('Error getting permissions: ' + data.error);
+        return;
+      }
+      
+      var isDir = data.isDir;
+      var currentPerms = data.permissions;
+      
+      $('modalContainer').innerHTML = `
+        <div class="modal-backdrop">
+          <div class="modal">
+            <div class="modal-header">
+              <h3><i class="fas fa-key"></i> File Permissions</h3>
+              <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+              <p>Change permissions for: <strong>${esc(path.split('/').pop())}</strong></p>
+              <div class="form-group">
+                <label for="permissions">Permissions (octal)</label>
+                <input type="text" id="permissions" class="form-control" value="${currentPerms}">
+              </div>
+              ${isDir ? `
+                <div class="form-group">
+                  <label>
+                    <input type="checkbox" id="recursive"> Apply recursively to all contents
+                  </label>
+                </div>
+              ` : ''}
+              <div id="permsStatus" class="mt"></div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+              <button class="btn btn-p" onclick="changePermissions('${esc(path)}')"><i class="fas fa-save"></i> Save</button>
+            </div>
+          </div>
+        </div>
+      `;
+    });
+}
+
+function changePermissions(path) {
+  var permissions = $('permissions').value.trim();
+  var recursive = $('recursive') ? $('recursive').checked : false;
+  
+  if (!permissions || !/^(0)?[0-7]{3,4}$/.test(permissions)) {
+    $('permsStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Please enter valid octal permissions (e.g. 0755)</div>';
+    return;
+  }
+  
+  $('permsStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-spinner fa-spin"></i> Changing permissions...</div>';
+  
+  api.post('/api/files/permissions', {
+    path: path,
+    permissions: permissions,
+    recursive: recursive
+  }).then(function(response) {
+    if (response.success) {
+      $('permsStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Permissions changed successfully</div>';
+      
+      setTimeout(function() {
+        closeModal();
+        loadFileManager(curPath);
+      }, 1000);
+    } else {
+      $('permsStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (response.error || 'Failed to change permissions') + '</div>';
+    }
+  });
+}
+
+function pasteFiles() {
+  if (!clipboard.items || clipboard.items.length === 0) return;
+  
+  var operation = clipboard.action;
+  var paths = clipboard.items;
+  var targetDir = curPath;
+  
+  // Build promises for each file operation
+  var operations = [];
+  
+  for (var i = 0; i < paths.length; i++) {
+    var sourcePath = paths[i];
+    var fileName = sourcePath.split('/').pop();
+    var targetPath = targetDir === '/' ? '/' + fileName : targetDir + '/' + fileName;
+    
+    // Skip if source and target are the same
+    if (sourcePath === targetPath) continue;
+    
+    if (operation === 'copy') {
+      // For copy, we'll need to implement a recursive copy on the server
+      operations.push({ source: sourcePath, target: targetPath });
+    } else if (operation === 'cut') {
+      // For cut, we can use the rename endpoint
+      operations.push(
+        api.post('/api/files/rename', { oldPath: sourcePath, newPath: targetPath })
+      );
+    }
+  }
+  
+  // If it's a cut operation, we can use the API directly
+  if (operation === 'cut' && operations.length > 0) {
+    Promise.all(operations)
+      .then(() => {
+        clipboard.items = [];
+        clipboard.action = '';
+        showNotification('Moved ' + paths.length + ' item(s) successfully');
+        loadFileManager(curPath);
+      })
+      .catch(err => {
+        showNotification('Error: ' + err.message);
+      });
+  } else if (operation === 'copy') {
+    // For copy, we'd need a server-side implementation
+    // For now, just show a not implemented message
+    showNotification('Copy operation not fully implemented yet');
+  }
+}
+
+function deleteSelectedFiles() {
+  if (selectedFiles.length === 0) return;
+  
+  var deleteCount = 0;
+  var errorCount = 0;
+  var totalFiles = selectedFiles.length;
+  
+  // Create promises for each delete operation
+  var deletePromises = selectedFiles.map(function(path) {
+    return api.del('/api/files?path=' + encodeURIComponent(path))
+      .then(function(response) {
+        if (response.success) {
+          deleteCount++;
+        } else {
+          errorCount++;
+        }
+      })
+      .catch(function() {
+        errorCount++;
+      });
+  });
+  
+  // Execute all delete operations
+  Promise.all(deletePromises)
+    .then(function() {
+      var message = deleteCount + ' of ' + totalFiles + ' items deleted';
+      if (errorCount > 0) {
+        message += ' (' + errorCount + ' failed)';
+      }
+      showNotification(message);
+      
+      // Refresh the file list
+      loadFileManager(curPath);
+    });
+}
+
+function handleFileManagerKeydown(e) {
+  // Ctrl+A: Select All
+  if (e.ctrlKey && e.key === 'a') {
+    e.preventDefault();
+    toggleSelectAll();
+  }
+  
+  // Delete key: Delete selected files
+  if (e.key === 'Delete' && selectedFiles.length > 0) {
+    e.preventDefault();
+    showBulkAction('delete');
+  }
+  
+  // Ctrl+C: Copy
+  if (e.ctrlKey && e.key === 'c' && selectedFiles.length > 0) {
+    e.preventDefault();
+    showBulkAction('copy');
+  }
+  
+  // Ctrl+X: Cut
+  if (e.ctrlKey && e.key === 'x' && selectedFiles.length > 0) {
+    e.preventDefault();
+    showBulkAction('cut');
+  }
+  
+  // Ctrl+V: Paste
+  if (e.ctrlKey && e.key === 'v' && clipboard.items && clipboard.items.length > 0) {
+    e.preventDefault();
+    pasteFiles();
+  }
+  
+  // F2: Rename
+  if (e.key === 'F2' && selectedFiles.length === 1) {
+    e.preventDefault();
+    showBulkAction('rename');
+  }
+}
+
+function closeModal() {
+  $('modalContainer').innerHTML = '';
+}
+
+// Domains Page
 function pgDom(el) {
   api.get('/api/domains').then(function(d) {
-    el.innerHTML='<h2 class="page-title">🌐 Domains</h2><p class="page-sub">Virtual host management</p><div id="domMsg"></div>'
-      +'<div class="flex-row"><input type="text" id="newDom" class="form-control" placeholder="example.com" style="max-width:300px"><button class="btn btn-p" onclick="addDom()">Add Domain</button></div>'
+    el.innerHTML='<h2 class="page-title"><i class="fas fa-globe"></i> Domains</h2><p class="page-sub">Virtual host management</p><div id="domMsg"></div>'
+      +'<div class="flex-row"><input type="text" id="newDom" class="form-control" placeholder="example.com" style="max-width:300px"><button class="btn btn-p" onclick="addDom()"><i class="fas fa-plus"></i> Add Domain</button></div>'
       +'<table class="tbl"><thead><tr><th>Domain</th><th>Document Root</th><th>Actions</th></tr></thead><tbody>'
       +d.map(function(x){
         return '<tr><td><strong>'+esc(x.name)+'</strong></td><td><code>'+esc(x.docRoot)+'</code></td>'
-          +'<td><button class="btn btn-p btn-sm" data-nav="'+encodeURIComponent(x.docRoot)+'" onclick="navF(this);loadPage(\'files\')">Files</button> '
-          +'<button class="btn btn-d btn-sm" data-dom="'+esc(x.name)+'" onclick="delDom(this)">Delete</button></td></tr>';
-      }).join('')+(d.length===0?'<tr><td colspan="3" style="text-align:center;color:#8a8d93">No domains yet</td></tr>':'')
+          +'<td><button class="btn btn-p btn-sm" data-path="'+encodeURIComponent(x.docRoot)+'" onclick="navToPath(this);loadPage(\'files\')"><i class="fas fa-folder-open"></i> Files</button> '
+          +'<button class="btn btn-d btn-sm" data-dom="'+esc(x.name)+'" onclick="delDom(this)"><i class="fas fa-trash-alt"></i> Delete</button></td></tr>';
+      }).join('')+(d.length===0?'<tr><td colspan="3" style="text-align:center;color:#7f8c8d">No domains yet</td></tr>':'')
       +'</tbody></table>';
   });
 }
 window.addDom=function(){
   var domain=$('newDom').value.trim(); if(!domain)return;
   api.post('/api/domains',{domain:domain}).then(function(r){
-    $('domMsg').innerHTML=r.success?'<div class="alert alert-ok">Domain added!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    $('domMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Domain added!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
     if(r.success)setTimeout(function(){loadPage('domains')},1200);
   });
 };
 window.delDom=function(btn){ var n=btn.dataset.dom; if(confirm('Delete domain '+n+'?'))api.del('/api/domains/'+n).then(function(){loadPage('domains')}); };
 
-/* ===== CLOUDFLARE MANAGEMENT UI ===== */
-function pgCloudflare(el) {
-  api.get('/api/cloudflare/config').then(function(cfg) {
-    if (!cfg.configured) {
-      // Tampilkan halaman setup API
-      el.innerHTML = '<h2 class="page-title">☁️ Cloudflare Management</h2>'
-        + '<p class="page-sub">Multi-domain management via Cloudflare API</p>'
-        + '<div id="cfMsg"></div>'
-        + '<div class="card">'
-        + '<h3 class="mb">Setup Cloudflare API</h3>'
-        + '<p style="color:#8a8d93;margin-bottom:20px;font-size:14px">'
-        + '1. Go to <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" style="color:#4f8cff">Cloudflare API Tokens</a><br>'
-        + '2. Create a Global API token with "Zone:Zone & Zone:DNS" permissions<br>'
-        + '3. Copy token and paste below</p>'
-        + '<div class="flex-row"><input id="cfToken" class="form-control" placeholder="API token..." style="flex:1">'
-        + '<input id="cfEmail" class="form-control" placeholder="Email address (optional)"></div>'
-        + '<button class="btn btn-p mt" onclick="cfSetupApi()">Configure API</button>'
-        + '</div>';
-      return;
-    }
-
-    // Tampilkan halaman manajemen domain
-    api.get('/api/cloudflare/zones').then(function(zones) {
-      var html = '<h2 class="page-title">☁️ Cloudflare Management</h2>'
-        + '<p class="page-sub">Account: ' + esc(cfg.accountName || 'Not configured') + ' (Token: ' + esc(cfg.tokenMask || 'None') + ')</p>'
-        + '<div id="cfMsg"></div>'
-        + '<div class="flex-row"><input type="text" id="newCfDomain" class="form-control" placeholder="example.com" style="max-width:300px">'
-        + '<div><label class="checkbox"><input type="checkbox" id="createVhost" checked> Create local vhost</label></div>'
-        + '<button class="btn btn-p" onclick="cfAddDomain()">Add Domain to Cloudflare</button></div>'
-        + '<table class="tbl"><thead><tr><th>Domain</th><th>Status</th><th>Name Servers</th><th>Actions</th></tr></thead><tbody>';
-
-      if (zones.length === 0) {
-        html += '<tr><td colspan="4" style="text-align:center;color:#8a8d93">No domains found in Cloudflare</td></tr>';
-      } else {
-        zones.forEach(function(zone) {
-          html += '<tr>'
-            + '<td><strong>' + esc(zone.name) + '</strong></td>'
-            + '<td><span class="badge ' + (zone.status === 'active' ? 'badge-on' : 'badge-off') + '">' + esc(zone.status) + '</span></td>'
-            + '<td><small style="font-size:12px;color:#8a8d93">' + esc(zone.nameServers ? zone.nameServers.join(', ') : 'None') + '</small></td>'
-            + '<td>'
-            + '<button class="btn btn-p btn-sm" data-zone="' + esc(zone.id) + '" data-domain="' + esc(zone.name) + '" onclick="cfManageDNS(this)">DNS</button> '
-            + '<button class="btn btn-s btn-sm" data-zone="' + esc(zone.id) + '" data-domain="' + esc(zone.name) + '" onclick="cfCreateVhost(this)">Create Vhost</button> '
-            + '<button class="btn btn-d btn-sm" data-zone="' + esc(zone.id) + '" data-domain="' + esc(zone.name) + '" onclick="cfDeleteDomain(this)">Delete</button>'
-            + '</td></tr>';
-        });
-      }
-      
-      html += '</tbody></table>'
-        + '<div class="mt"><button class="btn btn-w" onclick="cfResetApi()">Reset API Configuration</button></div>';
-      el.innerHTML = html;
-    }).catch(function(err) {
-      el.innerHTML = '<h2 class="page-title">☁️ Cloudflare Management</h2>'
-        + '<div class="alert alert-err">' + esc(err.message || 'Failed to load domains') + '</div>'
-        + '<div class="card">'
-        + '<h3>Reset API Configuration</h3>'
-        + '<p>If you\'re having issues with the Cloudflare integration, you can reset the API configuration.</p>'
-        + '<button class="btn btn-w mt" onclick="cfResetApi()">Reset API Configuration</button>'
-        + '</div>';
-    });
-  });
-}
-
-// Setup Cloudflare API
-window.cfSetupApi = function() {
-  var token = $('cfToken').value.trim();
-  var email = $('cfEmail') ? $('cfEmail').value.trim() : '';
-  
-  if (!token) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">API token required</div>';
-    return;
-  }
-  
-  api.post('/api/cloudflare/config', { token: token, email: email }).then(function(res) {
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">Cloudflare API configured successfully!</div>';
-    setTimeout(function() {
-      loadPage('cloudflare');
-    }, 1200);
-  }).catch(function(err) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to configure API') + '</div>';
-  });
-};
-
-// Reset Cloudflare API
-window.cfResetApi = function() {
-  if (!confirm('Reset Cloudflare API configuration? This will remove your API token.')) return;
-  
-  api.post('/api/cloudflare/config', { token: '', email: '' }).then(function() {
-    loadPage('cloudflare');
-  }).catch(function(err) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to reset configuration') + '</div>';
-  });
-};
-
-// Add domain to Cloudflare
-window.cfAddDomain = function() {
-  var domain = $('newCfDomain').value.trim();
-  var createVhost = $('createVhost') ? $('createVhost').checked : true;
-  
-  if (!domain) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">Domain name required</div>';
-    return;
-  }
-  
-  api.post('/api/cloudflare/zones', { domain: domain, createVhost: createVhost }).then(function(res) {
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">Domain added to Cloudflare!</div>';
-    setTimeout(function() {
-      loadPage('cloudflare');
-    }, 1200);
-  }).catch(function(err) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to add domain') + '</div>';
-  });
-};
-
-// Delete domain from Cloudflare
-window.cfDeleteDomain = function(btn) {
-  var zoneId = btn.dataset.zone;
-  var domain = btn.dataset.domain;
-  
-  if (!confirm('Delete domain ' + domain + ' from Cloudflare? This will also remove any DNS records.')) return;
-  
-  api.del('/api/cloudflare/zones/' + zoneId).then(function(res) {
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">Domain deleted from Cloudflare!</div>';
-    setTimeout(function() {
-      loadPage('cloudflare');
-    }, 1200);
-  }).catch(function(err) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to delete domain') + '</div>';
-  });
-};
-
-// Create local vhost for Cloudflare domain
-window.cfCreateVhost = function(btn) {
-  var domain = btn.dataset.domain;
-  
-  api.post('/api/domains', { domain: domain }).then(function(res) {
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">Virtual host created for ' + domain + '!</div>';
-  }).catch(function(err) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to create vhost') + '</div>';
-  });
-};
-
-// Manage DNS records
-window.cfManageDNS = function(btn) {
-  var zoneId = btn.dataset.zone;
-  var domain = btn.dataset.domain;
-  var el = $('content');
-  
-  el.innerHTML = '<h2 class="page-title">DNS Records: ' + esc(domain) + '</h2>'
-    + '<p class="page-sub">Manage DNS records for this domain</p>'
-    + '<div id="cfMsg"></div>'
-    + '<div class="mb"><button class="btn btn-s" onclick="loadPage(\'cloudflare\')">Back to Domains</button></div>'
-    + '<div class="card mb" style="text-align:center;padding:30px;"><span class="spinner">Loading DNS records...</span></div>';
-  
-  api.get('/api/cloudflare/zones/' + zoneId + '/dns').then(function(records) {
-    var html = '<div class="flex-row mb">'
-      + '<button class="btn btn-p" onclick="cfAddDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(domain) + '\')">Add DNS Record</button></div>'
-      + '<table class="tbl"><thead><tr><th>Type</th><th>Name</th><th>Content</th><th>TTL</th><th>Actions</th></tr></thead><tbody>';
-    
-    if (!records || records.length === 0) {
-      html += '<tr><td colspan="5" style="text-align:center;color:#8a8d93">No DNS records found</td></tr>';
-    } else {
-      records.forEach(function(rec) {
-        // Make name relative to domain if possible
-        let displayName = rec.name;
-        if (displayName === domain) {
-          displayName = '@';
-        } else if (displayName.endsWith('.' + domain)) {
-          displayName = displayName.substring(0, displayName.length - domain.length - 1);
-        }
-        
-        html += '<tr>'
-          + '<td>' + esc(rec.type) + '</td>'
-          + '<td>' + esc(displayName) + '</td>'
-          + '<td>' + esc(rec.content || (rec.type === 'MX' ? 'Priority: '+rec.priority : '')) + '</td>'
-          + '<td>' + (rec.ttl === 1 ? 'Auto' : rec.ttl) + '</td>'
-          + '<td>'
-          + '<button class="btn btn-w btn-sm" onclick="cfEditDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(rec.id) + '\', \'' + esc(domain) + '\', ' + JSON.stringify(rec).replace(/"/g, '&quot;') + ')">Edit</button> '
-          + '<button class="btn btn-d btn-sm" onclick="cfDeleteDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(rec.id) + '\', \'' + esc(domain) + '\')">Delete</button>'
-          + '</td></tr>';
-      });
-    }
-    
-    html += '</tbody></table>';
-    
-    el.innerHTML = '<h2 class="page-title">DNS Records: ' + esc(domain) + '</h2>'
-      + '<p class="page-sub">Manage DNS records for this domain</p>'
-      + '<div id="cfMsg"></div>'
-      + '<div class="mb"><button class="btn btn-s" onclick="loadPage(\'cloudflare\')">Back to Domains</button></div>'
-      + html;
-  }).catch(function(err) {
-    el.innerHTML = '<h2 class="page-title">DNS Records: ' + esc(domain) + '</h2>'
-      + '<div class="alert alert-err">' + esc(err.message || 'Failed to load DNS records') + '</div>'
-      + '<div class="mb"><button class="btn btn-s" onclick="loadPage(\'cloudflare\')">Back to Domains</button></div>';
-  });
-};
-
-// Add DNS record
-window.cfAddDnsRecord = function(zoneId, domain) {
-  // Create modal
-  var modalHtml = '<div class="modal" id="dnsModal">'
-    + '<div class="modal-content">'
-    + '<h3 class="modal-title">Add DNS Record</h3>'
-    + '<div class="mb"><label>Type</label><select id="dnsType" class="form-control" onchange="cfUpdateDnsForm()">'
-    + '<option value="A">A (IPv4 Address)</option>'
-    + '<option value="AAAA">AAAA (IPv6 Address)</option>'
-    + '<option value="CNAME">CNAME (Alias)</option>'
-    + '<option value="TXT">TXT (Text)</option>'
-    + '<option value="MX">MX (Mail)</option>'
-    + '</select></div>'
-    + '<div class="mb"><label>Name</label><input id="dnsName" class="form-control" placeholder="e.g., www or @ for root"></div>'
-    + '<div class="mb" id="dnsContentField"><label>Content</label><input id="dnsContent" class="form-control" placeholder="e.g., 192.168.1.1"></div>'
-    + '<div class="mb" id="dnsPriorityField" style="display:none"><label>Priority</label><input type="number" id="dnsPriority" class="form-control" value="10"></div>'
-    + '<div class="mb"><label>TTL</label><select id="dnsTtl" class="form-control">'
-    + '<option value="1">Auto</option>'
-    + '<option value="60">1 minute</option>'
-    + '<option value="300">5 minutes</option>'
-    + '<option value="1800">30 minutes</option>'
-    + '<option value="3600">1 hour</option>'
-    + '<option value="86400">1 day</option>'
-    + '</select></div>'
-    + '<div id="dnsFormMsg"></div>'
-    + '<div class="modal-footer">'
-    + '<button class="btn btn-p" onclick="cfSubmitDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(domain) + '\')">Add Record</button> '
-    + '<button class="btn btn-s" onclick="document.getElementById(\'dnsModal\').remove()">Cancel</button>'
-    + '</div></div></div>';
-  
-  document.body.insertAdjacentHTML('beforeend', modalHtml);
-};
-
-// Update DNS form based on type
-window.cfUpdateDnsForm = function() {
-  var type = $('dnsType').value;
-  
-  if (type === 'MX') {
-    $('dnsPriorityField').style.display = 'block';
-  } else {
-    $('dnsPriorityField').style.display = 'none';
-  }
-};
-
-// Submit DNS record
-window.cfSubmitDnsRecord = function(zoneId, domain) {
-  var type = $('dnsType').value;
-  var name = $('dnsName').value.trim();
-  var content = $('dnsContent').value.trim();
-  var ttl = parseInt($('dnsTtl').value);
-  
-  if (!name) {
-    $('dnsFormMsg').innerHTML = '<div class="alert alert-err">Name is required</div>';
-    return;
-  }
-  
-  if (type !== 'MX' && !content) {
-    $('dnsFormMsg').innerHTML = '<div class="alert alert-err">Content is required</div>';
-    return;
-  }
-  
-  // Format name field
-  if (name === '@') {
-    name = domain;
-  } else if (!name.endsWith('.' + domain) && !name.includes('.')) {
-    name = name + '.' + domain;
-  }
-  
-  var record = {
-    type: type,
-    name: name,
-    content: content,
-    ttl: ttl
-  };
-  
-  // Add priority for MX records
-  if (type === 'MX' && $('dnsPriority')) {
-    record.priority = parseInt($('dnsPriority').value) || 10;
-  }
-  
-  api.post('/api/cloudflare/zones/' + zoneId + '/dns', record).then(function(res) {
-    document.getElementById('dnsModal').remove();
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">DNS record added!</div>';
-    setTimeout(function() {
-      cfManageDNS({dataset: {zone: zoneId, domain: domain}});
-    }, 1000);
-  }).catch(function(err) {
-    $('dnsFormMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to add record') + '</div>';
-  });
-};
-
-// Edit DNS record
-window.cfEditDnsRecord = function(zoneId, recordId, domain, record) {
-  // Create modal with record data
-  var modalHtml = '<div class="modal" id="dnsEditModal">'
-    + '<div class="modal-content">'
-    + '<h3 class="modal-title">Edit DNS Record</h3>'
-    + '<div class="mb"><label>Type</label><input class="form-control" value="' + esc(record.type) + '" disabled></div>';
-    
-  // Format name for display
-  let displayName = record.name;
-  if (displayName === domain) {
-    displayName = '@';
-  } else if (displayName.endsWith('.' + domain)) {
-    displayName = displayName.substring(0, displayName.length - domain.length - 1);
-  }
-  
-  modalHtml += '<div class="mb"><label>Name</label><input id="editDnsName" class="form-control" value="' + esc(displayName) + '"></div>';
-    
-  // Content field for non-MX types
-  if (record.type !== 'MX') {
-    modalHtml += '<div class="mb"><label>Content</label><input id="editDnsContent" class="form-control" value="' + esc(record.content || '') + '"></div>';
-  } else {
-    modalHtml += '<div class="mb"><label>Content</label><input id="editDnsContent" class="form-control" value="' + esc(record.content || '') + '" placeholder="Mail server hostname"></div>'
-      + '<div class="mb"><label>Priority</label><input type="number" id="editDnsPriority" class="form-control" value="' + (record.priority || 10) + '"></div>';
-  }
-    
-  modalHtml += '<div class="mb"><label>TTL</label><select id="editDnsTtl" class="form-control">'
-    + '<option value="1" ' + (record.ttl === 1 ? 'selected' : '') + '>Auto</option>'
-    + '<option value="60" ' + (record.ttl === 60 ? 'selected' : '') + '>1 minute</option>'
-    + '<option value="300" ' + (record.ttl === 300 ? 'selected' : '') + '>5 minutes</option>'
-    + '<option value="1800" ' + (record.ttl === 1800 ? 'selected' : '') + '>30 minutes</option>'
-    + '<option value="3600" ' + (record.ttl === 3600 ? 'selected' : '') + '>1 hour</option>'
-    + '<option value="86400" ' + (record.ttl === 86400 ? 'selected' : '') + '>1 day</option>'
-    + '</select></div>'
-    + '<div id="dnsEditFormMsg"></div>'
-    + '<div class="modal-footer">'
-    + '<button class="btn btn-p" onclick="cfUpdateDnsRecord(\'' + esc(zoneId) + '\', \'' + esc(recordId) + '\', \'' + esc(domain) + '\', \'' + esc(record.type) + '\')">Update Record</button> '
-    + '<button class="btn btn-s" onclick="document.getElementById(\'dnsEditModal\').remove()">Cancel</button>'
-    + '</div></div></div>';
-  
-  document.body.insertAdjacentHTML('beforeend', modalHtml);
-};
-
-// Update DNS record
-window.cfUpdateDnsRecord = function(zoneId, recordId, domain, type) {
-  var name = $('editDnsName').value.trim();
-  var content = $('editDnsContent') ? $('editDnsContent').value.trim() : '';
-  var ttl = parseInt($('editDnsTtl').value);
-  
-  if (!name) {
-    $('dnsEditFormMsg').innerHTML = '<div class="alert alert-err">Name is required</div>';
-    return;
-  }
-  
-  if (type !== 'MX' && !content) {
-    $('dnsEditFormMsg').innerHTML = '<div class="alert alert-err">Content is required</div>';
-    return;
-  }
-  
-  // Format name field
-  if (name === '@') {
-    name = domain;
-  } else if (!name.endsWith('.' + domain) && !name.includes('.')) {
-    name = name + '.' + domain;
-  }
-  
-  var record = {
-    type: type,
-    name: name,
-    content: content,
-    ttl: ttl
-  };
-  
-  // Add priority for MX records
-  if (type === 'MX' && $('editDnsPriority')) {
-    record.priority = parseInt($('editDnsPriority').value) || 10;
-  }
-  
-  api.put('/api/cloudflare/zones/' + zoneId + '/dns/' + recordId, record).then(function(res) {
-    document.getElementById('dnsEditModal').remove();
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">DNS record updated!</div>';
-    setTimeout(function() {
-      cfManageDNS({dataset: {zone: zoneId, domain: domain}});
-    }, 1000);
-  }).catch(function(err) {
-    $('dnsEditFormMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to update record') + '</div>';
-  });
-};
-
-// Delete DNS record
-window.cfDeleteDnsRecord = function(zoneId, recordId, domain) {
-  if (!confirm('Delete this DNS record?')) return;
-  
-  api.del('/api/cloudflare/zones/' + zoneId + '/dns/' + recordId).then(function(res) {
-    $('cfMsg').innerHTML = '<div class="alert alert-ok">DNS record deleted!</div>';
-    setTimeout(function() {
-      cfManageDNS({dataset: {zone: zoneId, domain: domain}});
-    }, 1000);
-  }).catch(function(err) {
-    $('cfMsg').innerHTML = '<div class="alert alert-err">' + esc(err.message || 'Failed to delete record') + '</div>';
-  });
-};
-
+// Databases Page
 function pgDb(el) {
   Promise.all([api.get('/api/databases'),api.get('/api/dashboard')]).then(function(res){
     var d=res[0],info=res[1];
-    el.innerHTML='<h2 class="page-title">🗃️ Databases</h2><p class="page-sub">MariaDB management</p><div id="dbMsg"></div>'
+    el.innerHTML='<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2><p class="page-sub">MariaDB database management</p><div id="dbMsg"></div>'
       +'<div class="flex-row">'
-      +'<div><label style="font-size:12px;color:#8a8d93">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
-      +'<div><label style="font-size:12px;color:#8a8d93">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
-      +'<div><label style="font-size:12px;color:#8a8d93">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
-      +'<button class="btn btn-p" onclick="addDb()">Create</button></div>'
+      +'<div><label style="font-size:13px;color:#7f8c8d">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>'
+      +'<div><label style="font-size:13px;color:#7f8c8d">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>'
+      +'<div><label style="font-size:13px;color:#7f8c8d">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>'
+      +'<button class="btn btn-p" onclick="addDb()"><i class="fas fa-plus"></i> Create</button></div>'
       +'<table class="tbl"><thead><tr><th>Database</th><th>Actions</th></tr></thead><tbody>'
-      +(Array.isArray(d)?d:[]).map(function(x){return '<tr><td><strong>'+esc(x)+'</strong></td><td><button class="btn btn-d btn-sm" data-db="'+esc(x)+'" onclick="dropDb(this)">Drop</button></td></tr>';}).join('')
-      +'</tbody></table><div class="mt"><a href="http://'+info.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w">Open phpMyAdmin</a></div>';
+      +(Array.isArray(d)?d:[]).map(function(x){return '<tr><td><strong>'+esc(x)+'</strong></td><td><button class="btn btn-d btn-sm" data-db="'+esc(x)+'" onclick="dropDb(this)"><i class="fas fa-trash-alt"></i> Drop</button></td></tr>';}).join('')
+      +'</tbody></table><div class="mt"><a href="http://'+info.ip+':8088/phpmyadmin/" target="_blank" class="btn btn-w"><i class="fas fa-database"></i> Open phpMyAdmin</a></div>';
   });
 }
 window.addDb=function(){
   api.post('/api/databases',{name:$('dbName').value,user:$('dbUser').value,password:$('dbPass').value}).then(function(r){
-    $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok">Created!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Created!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
     if(r.success)setTimeout(function(){loadPage('databases')},1000);
   });
 };
 window.dropDb=function(btn){ var n=btn.dataset.db; if(confirm('DROP '+n+'?'))api.del('/api/databases/'+n).then(function(){loadPage('databases')}); };
 
+// Tunnel Page
 function pgTun(el) {
   api.get('/api/tunnel/status').then(function(s){
-    el.innerHTML='<h2 class="page-title">☁️ Cloudflare Tunnel</h2><p class="page-sub">Secure tunnel</p><div id="tunMsg"></div>'
+    el.innerHTML='<h2 class="page-title"><i class="fas fa-cloud"></i> Cloudflare Tunnel</h2><p class="page-sub">Secure tunnel for remote access</p><div id="tunMsg"></div>'
       +'<div class="card mb"><div class="label">Status</div><span class="badge '+(s.active?'badge-on':'badge-off')+'">'+(s.active?'Connected':'Not Connected')+'</span></div>'
       +'<div class="card"><h3 class="mb">Setup Tunnel</h3>'
-      +'<p style="color:#8a8d93;margin-bottom:15px;font-size:14px">1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:#4f8cff">Cloudflare Zero Trust</a><br>2. Create a Tunnel → copy token<br>3. Paste below</p>'
-      +'<div class="flex-row"><input id="tunToken" class="form-control" placeholder="Tunnel token..." style="flex:1"><button class="btn btn-p" onclick="setTun()">Connect</button></div></div>';
+      +'<p style="color:#7f8c8d;margin-bottom:15px;font-size:14px">1. Go to <a href="https://one.dash.cloudflare.com" target="_blank" style="color:#4a89dc">Cloudflare Zero Trust</a><br>2. Create a Tunnel → copy token<br>3. Paste below</p>'
+      +'<div class="flex-row"><input id="tunToken" class="form-control" placeholder="Tunnel token..." style="flex:1"><button class="btn btn-p" onclick="setTun()"><i class="fas fa-link"></i> Connect</button></div></div>';
   });
 }
 window.setTun=function(){
   api.post('/api/tunnel/setup',{token:$('tunToken').value.trim()}).then(function(r){
-    $('tunMsg').innerHTML=r.success?'<div class="alert alert-ok">Connected!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    $('tunMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Connected!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
     if(r.success)setTimeout(function(){loadPage('tunnel')},2000);
   });
 };
 
+// Terminal Page
 function pgTerm(el) {
-  el.innerHTML='<h2 class="page-title">💻 Terminal</h2><p class="page-sub">Run commands</p>'
+  el.innerHTML='<h2 class="page-title"><i class="fas fa-terminal"></i> Terminal</h2><p class="page-sub">Run shell commands</p>'
     +'<div class="terminal-box" id="termOut">$ </div>'
-    +'<div class="term-input"><input id="termIn" placeholder="Type command..." onkeydown="if(event.key===\'Enter\')runCmd()"><button class="btn btn-p" onclick="runCmd()">Run</button></div>';
+    +'<div class="term-input"><input id="termIn" placeholder="Type command..." onkeydown="if(event.key===\'Enter\')runCmd()"><button class="btn btn-p" onclick="runCmd()"><i class="fas fa-play"></i> Run</button></div>';
   $('termIn').focus();
 }
 window.runCmd=function(){
@@ -2061,23 +3186,25 @@ window.runCmd=function(){
   api.post('/api/terminal',{command:cmd}).then(function(r){ out.textContent+=(r.output||'')+'\n$ '; out.scrollTop=out.scrollHeight; });
 };
 
+// Settings Page
 function pgSet(el) {
-  el.innerHTML='<h2 class="page-title">🔧 Settings</h2><p class="page-sub">Panel configuration</p><div id="setMsg"></div>'
-    +'<div class="card" style="max-width:400px"><h3 class="mb">Change Password</h3>'
-    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">Current Password</label><input type="password" id="curPass" class="form-control"></div>'
-    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">New Password</label><input type="password" id="newPass" class="form-control"></div>'
-    +'<div class="mb"><label style="font-size:12px;color:#8a8d93">Confirm Password</label><input type="password" id="cfmPass" class="form-control"></div>'
-    +'<button class="btn btn-p" onclick="chgPass()">Update Password</button></div>';
+  el.innerHTML='<h2 class="page-title"><i class="fas fa-sliders-h"></i> Settings</h2><p class="page-sub">Panel configuration</p><div id="setMsg"></div>'
+    +'<div class="card" style="max-width:500px"><h3 class="mb">Change Admin Password</h3>'
+    +'<div class="form-group"><label>Current Password</label><input type="password" id="curPass" class="form-control"></div>'
+    +'<div class="form-group"><label>New Password</label><input type="password" id="newPass" class="form-control"></div>'
+    +'<div class="form-group"><label>Confirm Password</label><input type="password" id="cfmPass" class="form-control"></div>'
+    +'<button class="btn btn-p" onclick="chgPass()"><i class="fas fa-save"></i> Update Password</button></div>';
 }
 window.chgPass=function(){
   var np=$('newPass').value,cp=$('cfmPass').value;
-  if(np!==cp){$('setMsg').innerHTML='<div class="alert alert-err">Passwords don\'t match</div>';return;}
-  if(np.length<6){$('setMsg').innerHTML='<div class="alert alert-err">Min 6 characters</div>';return;}
+  if(np!==cp){$('setMsg').innerHTML='<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Passwords don\'t match</div>';return;}
+  if(np.length<6){$('setMsg').innerHTML='<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Min 6 characters</div>';return;}
   api.post('/api/settings/password',{currentPassword:$('curPass').value,newPassword:np}).then(function(r){
-    $('setMsg').innerHTML=r.success?'<div class="alert alert-ok">Updated!</div>':'<div class="alert alert-err">'+(r.error||'Failed')+'</div>';
+    $('setMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Password updated!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
   });
 };
 
+// Bootstrap app
 checkAuth();
 JSEOF
 
@@ -2361,18 +3488,6 @@ else
   sleep 3
 fi
 
-# Create cloudflare.json file with empty config
-cat > ${PANEL_DIR}/cloudflare.json << 'CFGEOF'
-{
-  "apiToken": "",
-  "accountId": "",
-  "accountName": "",
-  "email": "",
-  "zones": {}
-}
-CFGEOF
-chmod 600 ${PANEL_DIR}/cloudflare.json
-
 # Save credentials to secure location
 mkdir -p /etc/litepanel
 cat > /etc/litepanel/credentials <<CREDEOF
@@ -2418,12 +3533,6 @@ echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}║${N}  Saved: ${B}/etc/litepanel/credentials${N}"
 echo -e "${C}║${N}                                              ${C}║${N}"
 echo -e "${C}╚══════════════════════════════════════════════╝${N}"
-echo ""
-
-echo -e "${B}NEW FEATURE: Cloudflare Multi-Domain Management${N}"
-echo -e "${G}✓${N} Configure Cloudflare API in the new Cloudflare section"
-echo -e "${G}✓${N} Manage unlimited domains through Cloudflare dashboard"
-echo -e "${G}✓${N} DNS management directly from the panel"
 echo ""
 
 echo -e "${B}Service Status:${N}"

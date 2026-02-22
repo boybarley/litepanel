@@ -550,6 +550,13 @@ function svcActive(name) {
 }
 function escRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function shellEsc(s) { return s.replace(/'/g, "'\\''"); }
+function decodePathParameter(encodedPath) {
+  try {
+    return decodeURIComponent(encodedPath);
+  } catch (error) {
+    return encodedPath;
+  }
+}
 
 /* === File Operations === */
 function isTextFile(filePath, size) {
@@ -729,7 +736,9 @@ app.post('/api/services/:name/:action', auth, function(req, res) {
 
 /* === File Manager === */
 app.get('/api/files', auth, function(req, res) {
-  var p = path.resolve(req.query.path || '/');
+  var encodedPath = req.query.path || '/';
+  var p = path.resolve(decodePathParameter(encodedPath));
+  
   try {
     var stat = fs.statSync(p);
     if (stat.isDirectory()) {
@@ -770,7 +779,7 @@ app.put('/api/files', auth, function(req, res) {
 });
 
 app.delete('/api/files', auth, function(req, res) {
-  var target = req.query.path;
+  var target = decodePathParameter(req.query.path);
   if (!target || target === '/') return res.status(400).json({ error: 'Cannot delete root' });
   try { fs.rmSync(target, { recursive: true, force: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
@@ -780,7 +789,7 @@ app.delete('/api/files', auth, function(req, res) {
 var upload = multer({ dest: '/tmp/uploads/' });
 app.post('/api/files/upload', auth, upload.array('files'), function(req, res) {
   try {
-    const targetPath = req.body.path || '/tmp';
+    const targetPath = decodePathParameter(req.body.path) || '/tmp';
     const results = [];
     
     if (!req.files || req.files.length === 0) {
@@ -805,17 +814,22 @@ app.post('/api/files/upload', auth, upload.array('files'), function(req, res) {
 });
 
 app.post('/api/files/mkdir', auth, function(req, res) {
-  try { fs.mkdirSync(req.body.path, { recursive: true }); res.json({ success: true }); }
+  try { fs.mkdirSync(decodePathParameter(req.body.path), { recursive: true }); res.json({ success: true }); }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/files/rename', auth, function(req, res) {
-  try { fs.renameSync(req.body.oldPath, req.body.newPath); res.json({ success: true }); }
+  try { 
+    const oldPath = decodePathParameter(req.body.oldPath);
+    const newPath = decodePathParameter(req.body.newPath);
+    fs.renameSync(oldPath, newPath); 
+    res.json({ success: true }); 
+  }
   catch(e) { res.status(500).json({ error: e.error || e.message }); }
 });
 
 app.get('/api/files/download', auth, function(req, res) {
-  var fp = req.query.path;
+  var fp = decodePathParameter(req.query.path);
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: 'Not found' });
   try { 
     if (fs.statSync(fp).isDirectory()) return res.status(400).json({ error: 'Cannot download directory' }); 
@@ -836,10 +850,10 @@ app.get('/api/files/download', auth, function(req, res) {
 // New archive/compress endpoint
 app.post('/api/files/compress', auth, function(req, res) {
   try {
-    const sourcePaths = req.body.paths;
-    const outputPath = req.body.output;
+    const sourcePaths = Array.isArray(req.body.paths) ? req.body.paths.map(p => decodePathParameter(p)) : [];
+    const outputPath = decodePathParameter(req.body.output);
     
-    if (!Array.isArray(sourcePaths) || sourcePaths.length === 0 || !outputPath) {
+    if (sourcePaths.length === 0 || !outputPath) {
       return res.status(400).json({ error: 'Invalid parameters' });
     }
     
@@ -869,8 +883,8 @@ app.post('/api/files/compress', auth, function(req, res) {
 // New extract endpoint
 app.post('/api/files/extract', auth, function(req, res) {
   try {
-    const archivePath = req.body.archive;
-    const targetDir = req.body.target;
+    const archivePath = decodePathParameter(req.body.archive);
+    const targetDir = decodePathParameter(req.body.target);
     
     if (!archivePath || !targetDir) {
       return res.status(400).json({ error: 'Invalid parameters' });
@@ -898,7 +912,7 @@ app.post('/api/files/extract', auth, function(req, res) {
 
 // New endpoint for getting file permissions
 app.get('/api/files/permissions', auth, function(req, res) {
-  var p = req.query.path;
+  var p = decodePathParameter(req.query.path);
   if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'Not found' });
   
   try {
@@ -923,7 +937,7 @@ app.get('/api/files/permissions', auth, function(req, res) {
 // Endpoint for changing permissions
 app.post('/api/files/permissions', auth, function(req, res) {
   try {
-    const filePath = req.body.path;
+    const filePath = decodePathParameter(req.body.path);
     const permissions = req.body.permissions;
     const recursive = req.body.recursive === true;
     
@@ -957,7 +971,7 @@ app.post('/api/files/permissions', auth, function(req, res) {
 // Endpoint for creating new file
 app.post('/api/files/newfile', auth, function(req, res) {
   try {
-    const filePath = req.body.path;
+    const filePath = decodePathParameter(req.body.path);
     const content = req.body.content || '';
     
     if (!filePath) {
@@ -1018,6 +1032,7 @@ app.delete('/api/domains/:name', auth, function(req, res) {
 });
 
 /* === Databases === */
+// Get all databases and users
 app.get('/api/databases', auth, function(req, res) {
   try {
     // Get all databases 
@@ -1060,25 +1075,119 @@ app.get('/api/databases', auth, function(req, res) {
   }
 });
 
-app.post('/api/databases', auth, function(req, res) {
-  var name = req.body.name, user = req.body.user, password = req.body.password;
-  if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) return res.status(400).json({ error: 'Invalid DB name' });
-  if (user && !/^[a-zA-Z0-9_]+$/.test(user)) return res.status(400).json({ error: 'Invalid username' });
+// Get all database users
+app.get('/api/database-users', auth, function(req, res) {
   try {
-    var dp = shellEsc(config.dbRootPass);
-    run("mysql -u root -p'" + dp + "' -e \"CREATE DATABASE IF NOT EXISTS \\`" + name + "\\`;\" 2>/dev/null");
-    if (user && password) {
-      var sp = shellEsc(password);
-      run("mysql -u root -p'" + dp + "' -e \"CREATE USER IF NOT EXISTS '" + user + "'@'localhost' IDENTIFIED BY '" + sp + "'; GRANT ALL ON \\`" + name + "\\`.* TO '" + user + "'@'localhost'; FLUSH PRIVILEGES;\" 2>/dev/null");
-    }
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    var userOutput = run("mysql -u root -p'" + shellEsc(config.dbRootPass) + 
+                       "' -e 'SELECT User, Host FROM mysql.user WHERE Host=\"localhost\" AND User NOT IN (\"root\",\"debian-sys-maint\",\"mariadb.sys\");' -s -N 2>/dev/null");
+    var users = userOutput.split('\n').filter(function(u) { return u.trim(); }).map(function(u) {
+      var parts = u.split('\t');
+      return { username: parts[0], host: parts[1] || 'localhost' };
+    });
+    res.json(users);
+  } catch(e) {
+    console.error(e);
+    res.json([]);
+  }
 });
 
+// Create database
+app.post('/api/databases', auth, function(req, res) {
+  try {
+    var name = req.body.name;
+    var user = req.body.user;
+    var password = req.body.password;
+    
+    if (!name || !/^[a-zA-Z0-9_]+$/.test(name)) {
+      return res.status(400).json({ error: 'Invalid database name' });
+    }
+    
+    // Create the database
+    var dbEscaped = shellEsc(name);
+    var dp = shellEsc(config.dbRootPass);
+    run("mysql -u root -p'" + dp + "' -e \"CREATE DATABASE IF NOT EXISTS \\`" + dbEscaped + "\\`;\" 2>/dev/null");
+    
+    // If user is provided, create or update user with password
+    if (user && password) {
+      if (!/^[a-zA-Z0-9_]+$/.test(user)) {
+        return res.status(400).json({ error: 'Invalid username' });
+      }
+      
+      var userEscaped = shellEsc(user);
+      var passEscaped = shellEsc(password);
+      
+      // Create user if it doesn't exist
+      run("mysql -u root -p'" + dp + "' -e \"CREATE USER IF NOT EXISTS '" + userEscaped + "'@'localhost' IDENTIFIED BY '" + passEscaped + "';\" 2>/dev/null");
+      
+      // Grant privileges on database
+      run("mysql -u root -p'" + dp + "' -e \"GRANT ALL ON \\`" + dbEscaped + "\\`.* TO '" + userEscaped + "'@'localhost';\" 2>/dev/null");
+      
+      // Flush privileges
+      run("mysql -u root -p'" + dp + "' -e \"FLUSH PRIVILEGES;\" 2>/dev/null");
+    }
+    
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Create database user
+app.post('/api/database-users', auth, function(req, res) {
+  try {
+    var user = req.body.username;
+    var password = req.body.password;
+    var databases = req.body.databases || [];
+    
+    if (!user || !/^[a-zA-Z0-9_]+$/.test(user)) {
+      return res.status(400).json({ error: 'Invalid username' });
+    }
+    
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required' });
+    }
+    
+    var dp = shellEsc(config.dbRootPass);
+    var userEscaped = shellEsc(user);
+    var passEscaped = shellEsc(password);
+    
+    // Create or update user
+    run("mysql -u root -p'" + dp + "' -e \"CREATE USER IF NOT EXISTS '" + userEscaped + "'@'localhost' IDENTIFIED BY '" + passEscaped + "';\" 2>/dev/null");
+    
+    // Grant privileges on specified databases
+    if (Array.isArray(databases) && databases.length > 0) {
+      databases.forEach(function(db) {
+        if (/^[a-zA-Z0-9_]+$/.test(db)) {
+          run("mysql -u root -p'" + dp + "' -e \"GRANT ALL ON \\`" + shellEsc(db) + "\\`.* TO '" + userEscaped + "'@'localhost';\" 2>/dev/null");
+        }
+      });
+    }
+    
+    // Flush privileges
+    run("mysql -u root -p'" + dp + "' -e \"FLUSH PRIVILEGES;\" 2>/dev/null");
+    
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Delete database
 app.delete('/api/databases/:name', auth, function(req, res) {
   if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
   try {
     run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"DROP DATABASE IF EXISTS \\`" + req.params.name + "\\`;\" 2>/dev/null");
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Delete user
+app.delete('/api/database-users/:name', auth, function(req, res) {
+  if (!/^[a-zA-Z0-9_]+$/.test(req.params.name)) return res.status(400).json({ error: 'Invalid' });
+  try {
+    var user = req.params.name;
+    run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"DROP USER IF EXISTS '" + shellEsc(user) + "'@'localhost';\" 2>/dev/null");
+    run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"FLUSH PRIVILEGES;\" 2>/dev/null");
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1899,6 +2008,37 @@ textarea.form-control {
 }
 
 /* Database Section */
+.db-tabs {
+  display: flex;
+  border-bottom: 1px solid #eee;
+  margin-bottom: 20px;
+}
+
+.db-tab {
+  padding: 12px 20px;
+  background: none;
+  border: none;
+  border-bottom: 3px solid transparent;
+  font-size: 14px;
+  font-weight: 600;
+  color: #7f8c8d;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.db-tab:hover {
+  color: #4a89dc;
+}
+
+.db-tab.active {
+  color: #4a89dc;
+  border-bottom-color: #4a89dc;
+}
+
+.db-tab i {
+  margin-right: 8px;
+}
+
 .db-list {
   margin-top: 15px;
 }
@@ -1932,7 +2072,7 @@ textarea.form-control {
 }
 
 .db-users {
-  padding: 10px 15px 10px 35px;
+  padding: 10px 15px 10px 15px;
   font-size: 13px;
 }
 
@@ -3239,19 +3379,52 @@ window.delDom=function(btn){ var n=btn.dataset.dom; if(confirm('Delete domain '+
 
 // Databases Page
 function pgDb(el) {
-  Promise.all([api.get('/api/databases'),api.get('/api/dashboard')]).then(function(res){
-    var databases=res[0],info=res[1];
+  Promise.all([api.get('/api/databases'), api.get('/api/database-users'), api.get('/api/dashboard')]).then(function(res) {
+    var databases = res[0];
+    var users = res[1];
+    var info = res[2];
     
     // Start building the HTML
     var html = '<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2>';
     html += '<p class="page-sub">MariaDB database management</p><div id="dbMsg"></div>';
     
-    // Form for creating new database and user
+    // Create tabs for databases and users
+    html += '<div class="db-tabs mb">';
+    html += '<button class="db-tab active" onclick="showDbTab(\'databases\')"><i class="fas fa-database"></i> Databases</button>';
+    html += '<button class="db-tab" onclick="showDbTab(\'users\')"><i class="fas fa-users"></i> Database Users</button>';
+    html += '</div>';
+    
+    // Databases tab content
+    html += '<div id="tab-databases" class="db-tab-content">';
+    
+    // Form for creating new database
+    html += '<div class="card mb">';
+    html += '<h3 class="mb">Create Database</h3>';
     html += '<div class="flex-row">';
-    html += '<div><label style="font-size:13px;color:#7f8c8d">Database</label><input id="dbName" class="form-control" placeholder="my_db"></div>';
-    html += '<div><label style="font-size:13px;color:#7f8c8d">User (optional)</label><input id="dbUser" class="form-control" placeholder="user"></div>';
-    html += '<div><label style="font-size:13px;color:#7f8c8d">Password</label><input id="dbPass" class="form-control" placeholder="pass" type="password"></div>';
-    html += '<button class="btn btn-p" onclick="addDb()"><i class="fas fa-plus"></i> Create</button></div>';
+    html += '<div style="flex: 2;"><label style="font-size:13px;color:#7f8c8d">Database Name</label><input id="dbName" class="form-control" placeholder="my_database"></div>';
+    
+    // User dropdown selection
+    html += '<div style="flex: 1;"><label style="font-size:13px;color:#7f8c8d">Assign to User</label>';
+    html += '<select id="dbUserSelect" class="form-control">';
+    html += '<option value="">-- Create New User --</option>';
+    if (users && users.length > 0) {
+      users.forEach(function(user) {
+        html += '<option value="' + esc(user.username) + '">' + esc(user.username) + '</option>';
+      });
+    }
+    html += '</select></div>';
+    
+    // User/password fields - shown conditionally
+    html += '<div id="newUserFields" style="flex: 2;">';
+    html += '<label style="font-size:13px;color:#7f8c8d">New User</label>';
+    html += '<div style="display:flex;gap:10px;">';
+    html += '<input id="dbUser" class="form-control" placeholder="username">';
+    html += '<input id="dbPass" class="form-control" type="password" placeholder="password">';
+    html += '</div></div>';
+    
+    html += '<button class="btn btn-p" style="align-self:flex-end;" onclick="addDb()"><i class="fas fa-plus"></i> Create</button>';
+    html += '</div>';
+    html += '</div>';
     
     // Database list with users
     html += '<div class="db-list">';
@@ -3261,6 +3434,7 @@ function pgDb(el) {
         html += '<div class="db-header">';
         html += '<div class="db-name"><i class="fas fa-database"></i> ' + esc(db.name) + '</div>';
         html += '<div class="db-actions">';
+        html += '<button class="btn btn-w btn-sm" onclick="backupDatabase(\'' + esc(db.name) + '\')"><i class="fas fa-download"></i> Backup</button> ';
         html += '<button class="btn btn-d btn-sm" data-db="' + esc(db.name) + '" onclick="dropDb(this)"><i class="fas fa-trash-alt"></i> Drop</button>';
         html += '</div>'; // End db-actions
         html += '</div>'; // End db-header
@@ -3268,6 +3442,7 @@ function pgDb(el) {
         // Show users for this database
         if (db.users && db.users.length > 0) {
           html += '<div class="db-users">';
+          html += '<div style="margin-bottom: 5px; font-weight: 600; color: #7f8c8d;"><i class="fas fa-users"></i> Assigned Users:</div>';
           db.users.forEach(function(user) {
             html += '<div class="db-user"><i class="fas fa-user"></i> ' + esc(user) + '</div>';
           });
@@ -3282,21 +3457,300 @@ function pgDb(el) {
       html += '<div class="card mb"><p class="text-center" style="color:#7f8c8d;padding:20px;">No databases yet</p></div>';
     }
     html += '</div>'; // End db-list
+    html += '</div>'; // End databases tab
     
-    // Link to phpMyAdmin
+    // Users tab content
+    html += '<div id="tab-users" class="db-tab-content" style="display:none;">';
+    
+    // Form for creating new user
+    html += '<div class="card mb">';
+    html += '<h3 class="mb">Create User</h3>';
+    html += '<div class="flex-row">';
+    html += '<div><label style="font-size:13px;color:#7f8c8d">Username</label><input id="newUsername" class="form-control" placeholder="username"></div>';
+    html += '<div><label style="font-size:13px;color:#7f8c8d">Password</label><input id="newUserPass" class="form-control" type="password" placeholder="password"></div>';
+    
+    // Database selection - multi-select dropdown or checkboxes could be implemented here
+    html += '<div><label style="font-size:13px;color:#7f8c8d">Grant Access to Databases</label>';
+    html += '<select id="userDbAccess" class="form-control" multiple size="3">';
+    if (Array.isArray(databases) && databases.length > 0) {
+      databases.forEach(function(db) {
+        html += '<option value="' + esc(db.name) + '">' + esc(db.name) + '</option>';
+      });
+    }
+    html += '</select>';
+    html += '<small style="color:#7f8c8d;font-size:11px;">Hold Ctrl/Cmd to select multiple</small>';
+    html += '</div>';
+    
+    html += '<button class="btn btn-p" style="align-self:flex-end;" onclick="addDbUser()"><i class="fas fa-user-plus"></i> Create User</button>';
+    html += '</div>';
+    html += '</div>';
+    
+    // User list
+    html += '<div class="db-list">';
+    if (Array.isArray(users) && users.length > 0) {
+      users.forEach(function(user) {
+        html += '<div class="db-item">';
+        html += '<div class="db-header">';
+        html += '<div class="db-name"><i class="fas fa-user"></i> ' + esc(user.username) + '</div>';
+        html += '<div class="db-actions">';
+        html += '<button class="btn btn-w btn-sm" onclick="showChangePasswordDialog(\'' + esc(user.username) + '\')"><i class="fas fa-key"></i> Change Password</button> ';
+        html += '<button class="btn btn-d btn-sm" data-user="' + esc(user.username) + '" onclick="dropUser(this)"><i class="fas fa-trash-alt"></i> Drop</button>';
+        html += '</div>'; // End db-actions
+        html += '</div>'; // End db-header
+        
+        // Get databases for this user
+        var userDbs = [];
+        if (Array.isArray(databases)) {
+          userDbs = databases.filter(function(db) {
+            return db.users && db.users.includes(user.username);
+          }).map(function(db) { return db.name; });
+        }
+        
+        if (userDbs.length > 0) {
+          html += '<div class="db-users">';
+          html += '<div style="margin-bottom: 5px; font-weight: 600; color: #7f8c8d;"><i class="fas fa-database"></i> Has Access To:</div>';
+          userDbs.forEach(function(dbName) {
+            html += '<div class="db-user"><i class="fas fa-check-circle"></i> ' + esc(dbName) + '</div>';
+          });
+          html += '</div>'; // End db-users
+        } else {
+          html += '<div class="db-users"><div class="db-user"><i class="fas fa-info-circle"></i> No database access</div></div>';
+        }
+        
+        html += '</div>'; // End db-item
+      });
+    } else {
+      html += '<div class="card mb"><p class="text-center" style="color:#7f8c8d;padding:20px;">No database users yet</p></div>';
+    }
+    html += '</div>'; // End db-list
+    
+    html += '</div>'; // End users tab
+    
+    // phpMyAdmin link
     html += '<div class="mt"><a href="http://' + info.ip + ':8088/phpmyadmin/" target="_blank" class="btn btn-w"><i class="fas fa-database"></i> Open phpMyAdmin</a></div>';
     
     el.innerHTML = html;
+    
+    // Add event listener for user selection
+    setTimeout(function() {
+      if ($('dbUserSelect')) {
+        $('dbUserSelect').addEventListener('change', function() {
+          var showNewUser = this.value === '';
+          if ($('newUserFields')) {
+            $('newUserFields').style.display = showNewUser ? 'block' : 'none';
+          }
+        });
+        // Trigger change event to set initial state
+        $('dbUserSelect').dispatchEvent(new Event('change'));
+      }
+    }, 100);
   });
 }
 
-window.addDb=function(){
-  api.post('/api/databases',{name:$('dbName').value,user:$('dbUser').value,password:$('dbPass').value}).then(function(r){
-    $('dbMsg').innerHTML=r.success?'<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Created!</div>':'<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> '+(r.error||'Failed')+'</div>';
-    if(r.success)setTimeout(function(){loadPage('databases')},1000);
+// Show/hide database tabs
+window.showDbTab = function(tabName) {
+  // Hide all tab contents
+  document.querySelectorAll('.db-tab-content').forEach(function(tab) {
+    tab.style.display = 'none';
+  });
+  
+  // Remove active class from all tab buttons
+  document.querySelectorAll('.db-tab').forEach(function(btn) {
+    btn.classList.remove('active');
+  });
+  
+  // Show selected tab content and mark button as active
+  $('tab-' + tabName).style.display = 'block';
+  document.querySelector('.db-tab:nth-child(' + (tabName === 'databases' ? '1' : '2') + ')').classList.add('active');
+};
+
+// Add database function
+window.addDb = function() {
+  var name = $('dbName').value.trim();
+  var selectedUser = $('dbUserSelect').value;
+  var user = selectedUser || $('dbUser').value.trim();
+  var password = $('dbPass') ? $('dbPass').value : '';
+  
+  if (!name) {
+    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Database name is required</div>';
+    return;
+  }
+  
+  // If creating new user, password is required
+  if (selectedUser === '' && (!user || !password)) {
+    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> User and password required for new user</div>';
+    return;
+  }
+  
+  // If user is selected but not creating one, don't send password
+  var data = { name: name };
+  if (user) {
+    data.user = user;
+    // Only include password if creating new user or empty selection
+    if (selectedUser === '' && password) {
+      data.password = password;
+    }
+  }
+  
+  api.post('/api/databases', data).then(function(r) {
+    $('dbMsg').innerHTML = r.success ? 
+      '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Database created successfully!</div>' : 
+      '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to create database') + '</div>';
+    
+    if (r.success) setTimeout(function() { loadPage('databases'); }, 1000);
   });
 };
-window.dropDb=function(btn){ var n=btn.dataset.db; if(confirm('DROP '+n+'?'))api.del('/api/databases/'+n).then(function(){loadPage('databases')}); };
+
+// Add database user function
+window.addDbUser = function() {
+  var username = $('newUsername').value.trim();
+  var password = $('newUserPass').value;
+  
+  // Get selected databases
+  var selectElement = $('userDbAccess');
+  var selectedDatabases = [];
+  for (var i = 0; i < selectElement.options.length; i++) {
+    if (selectElement.options[i].selected) {
+      selectedDatabases.push(selectElement.options[i].value);
+    }
+  }
+  
+  if (!username) {
+    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Username is required</div>';
+    return;
+  }
+  
+  if (!password) {
+    $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Password is required</div>';
+    return;
+  }
+  
+  api.post('/api/database-users', {
+    username: username,
+    password: password,
+    databases: selectedDatabases
+  }).then(function(r) {
+    $('dbMsg').innerHTML = r.success ? 
+      '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> User created successfully!</div>' : 
+      '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to create user') + '</div>';
+    
+    if (r.success) setTimeout(function() { loadPage('databases'); }, 1000);
+  });
+};
+
+// Backup database function
+window.backupDatabase = function(dbName) {
+  $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-spinner fa-spin"></i> Creating backup...</div>';
+  
+  var cmd = "mysqldump -u root -p'" + shellEscape(dbRootPassword) + "' " + dbName + " > /tmp/" + dbName + ".sql";
+  api.post('/api/terminal', { command: cmd }).then(function(r) {
+    if (r.output && r.output.includes('ERROR')) {
+      $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Backup failed: ' + r.output + '</div>';
+    } else {
+      // Create a download link
+      var downloadCmd = "cd /tmp && tar -czf " + dbName + ".sql.tar.gz " + dbName + ".sql";
+      api.post('/api/terminal', { command: downloadCmd }).then(function() {
+        $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Backup created successfully! <a href="/api/files/download?path=/tmp/' + dbName + '.sql.tar.gz" class="btn btn-s btn-sm">Download</a></div>';
+      });
+    }
+  });
+};
+
+// Drop database function
+window.dropDb = function(btn) {
+  var dbName = btn.dataset.db;
+  if (confirm('Are you sure you want to DROP database ' + dbName + '?\nThis action cannot be undone!')) {
+    api.del('/api/databases/' + dbName).then(function(r) {
+      if (r.success) {
+        $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Database dropped successfully!</div>';
+        setTimeout(function() { loadPage('databases'); }, 1000);
+      } else {
+        $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to drop database') + '</div>';
+      }
+    });
+  }
+};
+
+// Drop user function
+window.dropUser = function(btn) {
+  var username = btn.dataset.user;
+  if (confirm('Are you sure you want to DROP user ' + username + '?\nThis action cannot be undone!')) {
+    api.del('/api/database-users/' + username).then(function(r) {
+      if (r.success) {
+        $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> User dropped successfully!</div>';
+        setTimeout(function() { loadPage('databases'); }, 1000);
+      } else {
+        $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to drop user') + '</div>';
+      }
+    });
+  }
+};
+
+// Show change password dialog
+window.showChangePasswordDialog = function(username) {
+  $('modalContainer').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3><i class="fas fa-key"></i> Change Password</h3>
+          <button class="modal-close" onclick="closeModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <p>Change password for user: <strong>${esc(username)}</strong></p>
+          <div class="form-group">
+            <label for="newUserPassword">New Password</label>
+            <input type="password" id="newUserPassword" class="form-control">
+          </div>
+          <div class="form-group">
+            <label for="confirmUserPassword">Confirm Password</label>
+            <input type="password" id="confirmUserPassword" class="form-control">
+          </div>
+          <div id="changePasswordStatus" class="mt"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-l" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-p" onclick="changeUserPassword('${esc(username)}')"><i class="fas fa-save"></i> Save</button>
+        </div>
+      </div>
+    </div>
+  `;
+};
+
+// Change user password
+window.changeUserPassword = function(username) {
+  var newPass = $('newUserPassword').value;
+  var confirmPass = $('confirmUserPassword').value;
+  
+  if (!newPass) {
+    $('changePasswordStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> New password is required</div>';
+    return;
+  }
+  
+  if (newPass !== confirmPass) {
+    $('changePasswordStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Passwords do not match</div>';
+    return;
+  }
+  
+  // Create user with same name but new password (MySQL will update)
+  api.post('/api/database-users', {
+    username: username,
+    password: newPass,
+    databases: [] // Keep existing permissions
+  }).then(function(r) {
+    if (r.success) {
+      $('changePasswordStatus').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Password changed successfully!</div>';
+      setTimeout(function() { closeModal(); }, 1000);
+    } else {
+      $('changePasswordStatus').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + (r.error || 'Failed to change password') + '</div>';
+    }
+  });
+};
+
+// Helper function to escape MySQL passwords in shell commands
+function shellEscape(str) {
+  if (!str) return '';
+  return str.replace(/'/g, "'\\''");
+}
 
 // Tunnel Page
 function pgTun(el) {

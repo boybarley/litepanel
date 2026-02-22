@@ -48,7 +48,7 @@ clear
 echo -e "${C}"
 echo "  ╔══════════════════════════════════╗"
 echo "  ║   LitePanel Installer v2.1       ║"
-echo "  ║   Ubuntu 22.04 LTS              ║"
+echo "  ║   Ubuntu 22.04 LTS               ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${N}"
 sleep 2

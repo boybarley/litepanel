@@ -72,7 +72,7 @@ After installation:
 
 | Service | URL |
 |---------|-----|
-| Panel | `http://your-ip:3000 |
+| Panel | 'http://your-ip:3000' |
 | OLS Admin |  http://your-ip:7080 |
 | phpMyAdmin | http://your-ip:8088/phpmyadmin/ |
 

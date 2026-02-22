@@ -1051,7 +1051,7 @@ app.get('/api/databases', auth, function(req, res) {
       };
     });
     
-    // Get database sizes
+    // Get database sizes - process each database separately to prevent timeouts
     for (var i = 0; i < dbNames.length; i++) {
       var dbName = dbNames[i];
       
@@ -1101,7 +1101,7 @@ app.get('/api/databases', auth, function(req, res) {
     res.json(dblist);
   } catch(e) { 
     console.error("Database error:", e);
-    res.json([]); 
+    res.status(500).json({ error: e.message || "Failed to fetch databases" }); 
   }
 });
 
@@ -1118,7 +1118,7 @@ app.get('/api/database/users', auth, function(req, res) {
     
     res.json(users);
   } catch(e) { 
-    res.json([]); 
+    res.status(500).json({ error: e.message || "Failed to fetch database users" }); 
   }
 });
 
@@ -3503,6 +3503,9 @@ function loadDbDatabases() {
       }
       
       dbContent.innerHTML = html;
+    })
+    .catch(function(error) {
+      dbContent.innerHTML = `<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Error loading databases: ${error.message || 'Unknown error'}</div>`;
     });
 }
 
@@ -3556,6 +3559,9 @@ function loadDbUsers() {
       }
       
       dbContent.innerHTML = html;
+    })
+    .catch(function(error) {
+      dbContent.innerHTML = `<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Error loading users: ${error.message || 'Unknown error'}</div>`;
     });
 }
 
@@ -3636,6 +3642,9 @@ function loadDbPrivileges() {
       html += '</div>';
       
       dbContent.innerHTML = html;
+    })
+    .catch(function(error) {
+      dbContent.innerHTML = `<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Error loading data: ${error.message || 'Unknown error'}</div>`;
     });
 }
 

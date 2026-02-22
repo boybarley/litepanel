@@ -1,6 +1,6 @@
 # 🛠️ LitePanel by BoyBarley
 
-**Lightweight Home Server Control Panel** for Ubuntu 22.04
+**Lightweight Home Server Control Panel** for Ubuntu 22.04 & Cloudflare
 
 Built with OpenLiteSpeed + MariaDB + PHP Native + Cloudflare Tunnel
 
@@ -124,3 +124,68 @@ MIT License — free to use, modify, and distribute.
 ## Contributing
 
 Pull requests welcome. For major changes, open an issue first.
+
+Cara Mendapatkan Cloudflare API Token dan Tunnel Token
+1. Mendapatkan Cloudflare API Token (untuk Multi-Domain Management)
+Cloudflare API Token diperlukan untuk manajemen domain dan DNS dari panel:
+
+Login ke Cloudflare Dashboard
+
+Buka https://dash.cloudflare.com/ dan login
+Akses Halaman API Tokens
+
+Klik ikon profil di pojok kanan atas
+Pilih "My Profile"
+Pilih tab "API Tokens" di sidebar
+Buat API Token Baru
+
+Klik tombol "Create Token"
+Pilih "Create Custom Token"
+Beri nama token (misalnya "LitePanel Domain Management")
+Atur Izin (Permissions)
+
+Tambahkan izin berikut:
+Zone - Zone - Read
+Zone - Zone Settings - Edit
+Zone - DNS - Edit
+Di bagian Zone Resources, pilih "Include - All Zones"
+Buat Token
+
+Klik "Continue to Summary"
+Review izin dan klik "Create Token"
+PENTING: Salin token yang ditampilkan (token hanya ditampilkan satu kali)
+Masukkan dalam Panel
+
+Masukkan token ini di halaman Cloudflare pada LitePanel
+2. Mendapatkan Cloudflare Tunnel Token
+Tunnel Token digunakan untuk membuat koneksi aman dari server ke internet tanpa perlu port forwarding:
+
+Login ke Cloudflare Zero Trust Dashboard
+
+Buka https://one.dash.cloudflare.com/
+Login dengan akun Cloudflare Anda
+Navigasi ke Tunnels
+
+Di menu sidebar, klik "Access"
+Pilih "Tunnels"
+Buat Tunnel Baru
+
+Klik tombol "Create a tunnel"
+Beri nama tunnel (misal: "LitePanel Server")
+Klik "Save tunnel"
+Dapatkan Token untuk Instalasi
+
+Pada langkah berikutnya, Anda akan diminta untuk memilih platform
+Pilih "Linux" dan kemudian "AMD64" (atau ARM64 jika server Anda ARM)
+Token akan ditampilkan dalam perintah instalasi
+Salin string token yang ada di antara argumen --token (biasanya string panjang yang dimulai dengan eyJhIjo...)
+Masukkan dalam Panel
+
+Masukkan token ini di halaman "Tunnel" pada LitePanel
+Klik "Connect" untuk mengaktifkan tunnel
+Konfigurasi Routing
+
+Kembali ke dashboard Cloudflare Zero Trust
+Di bawah tunnel yang baru dibuat, konfigurasi subdomain dan domain yang ingin Anda gunakan
+Arahkan ke localhost dengan port yang sesuai (misalnya: localhost:80 untuk web server)
+Setelah kedua token dikonfigurasi, LitePanel Anda akan memiliki akses lengkap untuk mengelola domain dan DNS melalui Cloudflare, serta kemampuan untuk mengakses server dari Internet secara aman melalui Cloudflare Tunnel.

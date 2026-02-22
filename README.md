@@ -132,6 +132,9 @@ MIT License — free to use, modify, and distribute.
 
 Pull requests welcome. For major changes, open an issue first.
 
+
+
+## Pro Version on www.boybarley.com
 Cara Mendapatkan Cloudflare API Token dan Tunnel Token
 1. Mendapatkan Cloudflare API Token (untuk Multi-Domain Management)
 Cloudflare API Token diperlukan untuk manajemen domain dan DNS dari panel:

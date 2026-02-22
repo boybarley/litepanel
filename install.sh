@@ -601,6 +601,7 @@ function extractArchive(archivePath, targetDir) {
     zip.extractAllTo(targetDir, true);
     return true;
   } catch (e) {
+    console.error('Extract error:', e);
     return false;
   }
 }
@@ -880,7 +881,7 @@ app.post('/api/files/compress', auth, function(req, res) {
   }
 });
 
-// New extract endpoint
+// Improved extract endpoint with better error handling
 app.post('/api/files/extract', auth, function(req, res) {
   try {
     const archivePath = decodePathParameter(req.body.archive);
@@ -894,18 +895,40 @@ app.post('/api/files/extract', auth, function(req, res) {
       return res.status(404).json({ error: 'Archive not found' });
     }
     
+    // Check if archive is a zip file
+    if (!archivePath.toLowerCase().endsWith('.zip')) {
+      return res.status(400).json({ error: 'Only ZIP files are supported for extraction' });
+    }
+    
     // Create target directory if it doesn't exist
     fs.mkdirSync(targetDir, { recursive: true });
     
-    // Extract archive
-    const success = extractArchive(archivePath, targetDir);
+    console.log('Extracting', archivePath, 'to', targetDir);
     
-    if (success) {
+    // Extract archive with detailed error handling
+    try {
+      const zip = new AdmZip(archivePath);
+      zip.extractAllTo(targetDir, true);
       res.json({ success: true, path: targetDir });
-    } else {
-      res.status(500).json({ error: 'Failed to extract archive' });
+    } catch (zipError) {
+      console.error('ZIP extraction error:', zipError);
+      
+      // Fall back to using unzip command
+      try {
+        execSync(`unzip -o "${shellEsc(archivePath)}" -d "${shellEsc(targetDir)}"`, {
+          timeout: 60000  // Allow up to 60 seconds for extraction
+        });
+        res.json({ success: true, path: targetDir });
+      } catch (cmdError) {
+        console.error('Command extraction error:', cmdError);
+        res.status(500).json({ 
+          error: 'Failed to extract archive', 
+          details: zipError.message
+        });
+      }
     }
   } catch(e) {
+    console.error('Extract general error:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1151,8 +1174,11 @@ app.post('/api/database-users', auth, function(req, res) {
     var userEscaped = shellEsc(user);
     var passEscaped = shellEsc(password);
     
-    // Create or update user
+    // Create or update user with new password
     run("mysql -u root -p'" + dp + "' -e \"CREATE USER IF NOT EXISTS '" + userEscaped + "'@'localhost' IDENTIFIED BY '" + passEscaped + "';\" 2>/dev/null");
+    
+    // For existing users, update password
+    run("mysql -u root -p'" + dp + "' -e \"ALTER USER '" + userEscaped + "'@'localhost' IDENTIFIED BY '" + passEscaped + "';\" 2>/dev/null");
     
     // Grant privileges on specified databases
     if (Array.isArray(databases) && databases.length > 0) {
@@ -1190,6 +1216,48 @@ app.delete('/api/database-users/:name', auth, function(req, res) {
     run("mysql -u root -p'" + shellEsc(config.dbRootPass) + "' -e \"FLUSH PRIVILEGES;\" 2>/dev/null");
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Backup database endpoint
+app.post('/api/databases/backup', auth, function(req, res) {
+  try {
+    const dbName = req.body.dbName;
+    if (!dbName || !/^[a-zA-Z0-9_]+$/.test(dbName)) {
+      return res.status(400).json({ error: 'Invalid database name' });
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupDir = '/tmp';
+    const backupFile = `${dbName}_${timestamp}.sql`;
+    const backupPath = `${backupDir}/${backupFile}`;
+    const archivePath = `${backupPath}.gz`;
+
+    // Execute mysqldump
+    const dumpCommand = `mysqldump -u root -p'${shellEsc(config.dbRootPass)}' --single-transaction --quick --lock-tables=false ${shellEsc(dbName)} > ${backupPath}`;
+    run(dumpCommand, 60000); // Allow 60 seconds for dump
+
+    // Check if dump was successful
+    if (!fs.existsSync(backupPath) || fs.statSync(backupPath).size === 0) {
+      return res.status(500).json({ error: 'Database backup failed' });
+    }
+
+    // Compress the backup
+    const gzipCommand = `gzip -f ${backupPath}`;
+    run(gzipCommand, 30000);
+
+    if (!fs.existsSync(archivePath)) {
+      return res.status(500).json({ error: 'Compression failed' });
+    }
+
+    res.json({
+      success: true,
+      path: archivePath,
+      filename: `${backupFile}.gz`,
+      size: fs.statSync(archivePath).size
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Backup failed' });
+  }
 });
 
 /* === Tunnel === */
@@ -2184,6 +2252,7 @@ var editFile = '';
 var selectedFiles = [];
 var sortConfig = { key: 'name', direction: 'asc' };
 var clipboard = { items: [], action: '' };
+var dbRootPassword = ''; // Will be populated from server later
 
 // Authentication functions
 function checkAuth() {
@@ -2605,6 +2674,17 @@ function showFileContextMenu(e, el) {
         <i class="fas fa-download"></i> Download
       </div>
     `;
+    
+    // Add edit option for text files
+    var ext = fileName.split('.').pop().toLowerCase();
+    const editableExts = ['txt', 'html', 'htm', 'css', 'js', 'php', 'xml', 'json', 'md', 'ini', 'conf', 'sh', 'py', 'c', 'cpp', 'h', 'java', 'rb', 'pl', 'lua'];
+    if (editableExts.includes(ext)) {
+      menu.innerHTML += `
+        <div class="menu-item" onclick="editFile('${path}')">
+          <i class="fas fa-edit"></i> Edit
+        </div>
+      `;
+    }
   }
   
   menu.innerHTML += `
@@ -2639,15 +2719,6 @@ function showFileContextMenu(e, el) {
         <div class="divider"></div>
         <div class="menu-item" onclick="showExtractDialog('${path}')">
           <i class="fas fa-box-open"></i> Extract
-        </div>
-      `;
-    }
-    
-    // Option to edit text files
-    if (['txt', 'html', 'css', 'js', 'php', 'conf', 'json', 'md', 'xml', 'ini'].includes(ext)) {
-      menu.innerHTML += `
-        <div class="menu-item" onclick="editFile('${path}')">
-          <i class="fas fa-edit"></i> Edit
         </div>
       `;
     }
@@ -2692,7 +2763,22 @@ function openFile(el) {
     loadFileManager(path);
     curPath = path;
   } else {
-    editFile(path);
+    // Check if it's a common editable file type
+    var fileName = el.getAttribute('data-filename');
+    var ext = fileName.split('.').pop().toLowerCase();
+    const editableExts = ['txt', 'html', 'htm', 'css', 'js', 'php', 'xml', 'json', 'md', 'ini', 'conf', 'sh', 'py', 'c', 'cpp', 'h', 'java', 'rb', 'pl', 'lua'];
+    
+    if (editableExts.includes(ext)) {
+      editFile(path);
+    } else {
+      // For non-text files, just get file info
+      api.get('/api/files?path=' + encodeURIComponent(path)).then(function(data) {
+        if (!data.binary && !data.tooLarge) {
+          // If it's actually text, allow editing
+          editFile(path);
+        }
+      });
+    }
   }
 }
 
@@ -3270,9 +3356,45 @@ function pasteFiles() {
         showNotification('Error: ' + err.message);
       });
   } else if (operation === 'copy') {
-    // For copy, we'd need a server-side implementation
-    // For now, just show a not implemented message
-    showNotification('Copy operation not fully implemented yet');
+    // For copy, use the command line for now
+    // This is a simple implementation - for complex copying, we'd need a proper server endpoint
+    var commands = [];
+    for (var i = 0; i < operations.length; i++) {
+      var op = operations[i];
+      var isDir = false;
+      try {
+        // Check if source is a directory (this is client-side, not ideal but works for simple cases)
+        var sourceEl = document.querySelector(`.file-item[data-path="${op.source}"]`);
+        isDir = sourceEl && sourceEl.querySelector('.icon.folder') !== null;
+      } catch(e) {
+        console.error(e);
+      }
+      
+      var cmd = isDir ? 
+        `cp -r "${op.source}" "${op.target}"` : 
+        `cp "${op.source}" "${op.target}"`;
+      commands.push(cmd);
+    }
+    
+    // Execute all copy commands
+    if (commands.length > 0) {
+      showNotification('Copying files...');
+      
+      // Run commands one by one
+      var runCommands = async function() {
+        for (var i = 0; i < commands.length; i++) {
+          try {
+            await api.post('/api/terminal', { command: commands[i] });
+          } catch(e) {
+            console.error('Command failed:', commands[i], e);
+          }
+        }
+        showNotification('Copy completed');
+        loadFileManager(curPath);
+      };
+      
+      runCommands();
+    }
   }
 }
 
@@ -3383,6 +3505,14 @@ function pgDb(el) {
     var databases = res[0];
     var users = res[1];
     var info = res[2];
+    
+    // Store DB root password globally
+    api.post('/api/terminal', { command: "cat /etc/litepanel/credentials | grep 'MariaDB Root' | awk '{print $3}'" })
+      .then(function(result) {
+        if (result && result.output) {
+          dbRootPassword = result.output.trim();
+        }
+      });
     
     // Start building the HTML
     var html = '<h2 class="page-title"><i class="fas fa-database"></i> Databases</h2>';
@@ -3642,18 +3772,20 @@ window.addDbUser = function() {
 window.backupDatabase = function(dbName) {
   $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-spinner fa-spin"></i> Creating backup...</div>';
   
-  var cmd = "mysqldump -u root -p'" + shellEscape(dbRootPassword) + "' " + dbName + " > /tmp/" + dbName + ".sql";
-  api.post('/api/terminal', { command: cmd }).then(function(r) {
-    if (r.output && r.output.includes('ERROR')) {
-      $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Backup failed: ' + r.output + '</div>';
-    } else {
-      // Create a download link
-      var downloadCmd = "cd /tmp && tar -czf " + dbName + ".sql.tar.gz " + dbName + ".sql";
-      api.post('/api/terminal', { command: downloadCmd }).then(function() {
-        $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Backup created successfully! <a href="/api/files/download?path=/tmp/' + dbName + '.sql.tar.gz" class="btn btn-s btn-sm">Download</a></div>';
-      });
-    }
-  });
+  api.post('/api/databases/backup', { dbName: dbName })
+    .then(function(r) {
+      if (r.success) {
+        $('dbMsg').innerHTML = '<div class="alert alert-ok"><i class="fas fa-check-circle"></i> Backup created successfully! ' +
+          '<a href="/api/files/download?path=' + encodeURIComponent(r.path) + '" class="btn btn-s btn-sm">Download</a></div>';
+      } else {
+        $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> ' + 
+          (r.error || 'Backup failed') + '</div>';
+      }
+    })
+    .catch(function(error) {
+      $('dbMsg').innerHTML = '<div class="alert alert-err"><i class="fas fa-exclamation-triangle"></i> Backup failed: ' + 
+        (error.message || 'Unknown error') + '</div>';
+    });
 };
 
 // Drop database function
